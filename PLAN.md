@@ -8,18 +8,20 @@
 | M2 links, runs headless | done — node harness (`tools/build.py --headless`, frame dumps, scripted input, stack traces) |
 | M3 menu in the browser | done — side-selection screen in Chrome |
 | M4 GDI mission 1, no sound | done — mission plays; selection/mouse work in Chrome |
-| M5 audio | done — Westwood SOUNDIO on DirectSound-over-SDL (browser device path untested) |
-| M6 movies | in progress — WINVQ player port |
+| M5 audio | done — Westwood SOUNDIO on DirectSound-over-SDL; Web Audio verified in Chrome |
+| M6 movies | done — WINVQ player; intro and GDI briefings play in Chrome with sound |
 | M7 ship | in progress — player build (`--release --no-data`) asks for the freeware disc image and keeps data in IndexedDB |
 
 Things learned along the way (beyond the original risk list):
 - The Remastered WIN32LIB had video mode, keyboard handler and mouse drawing stubbed out; restored from the 1995 bodies left under `#if 0`.
 - Watcom enum sizing matters: game code is built with `-fshort-enums` (SDL-facing files excepted).
 - Tiberian Dawn windows are in 8-pixel units; the Remastered GBUFFER.H assumed Red Alert's pixel units.
+- More Remaster stubs: the software mouse cursor (MOUSEWW.CPP), Texture_Fill_Rect (dialog backgrounds), DEFAULT_SCREEN_WIDTH (768 vs 320).
+- Watcom-tolerated undefined behaviour clang exploits: writes into a `static const` array (tooltip refresh list).
+- The freeware CONQUER.ENG predates v1.07's strings; out-of-range text numbers fall back to CONQUER.H's English.
 - The OpenRA data package lacks the Win95 fonts (UPDATE.MIX); the disc's INSTALL/SETUP.Z (InstallShield 3) holds them.
 
 Known issues:
-- Tooltip boxes lose their first glyph and leave remnants (map-cell refresh around help text).
 - Nod-campaign movies live on the Nod disc (a second MOVIES.MIX); only the GDI disc is supported so far.
 - Multiplayer is off (IPX/Winsock/DDE report no network).
 
