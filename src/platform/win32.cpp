@@ -221,15 +221,18 @@ extern "C" SHORT WINAPI VkKeyScan(CHAR ch)
 	return -1;
 }
 
+/*
+** Mouse button state as the game has been told it (not SDL's live state):
+** the button-down message and "is it still down?" must agree even when a
+** click is shorter than a game frame.
+*/
+static bool ButtonDown[3];		// left, right, middle
+
 static int Mouse_Buttons_To_VK_Down(int vk)
 {
-#ifdef WEBCANDC_HEADLESS
-	return 0;
-#endif
-	Uint32 b = SDL_GetMouseState(NULL, NULL);
-	if (vk == VK_LBUTTON) return (b & SDL_BUTTON_LMASK) != 0;
-	if (vk == VK_RBUTTON) return (b & SDL_BUTTON_RMASK) != 0;
-	if (vk == VK_MBUTTON) return (b & SDL_BUTTON_MMASK) != 0;
+	if (vk == VK_LBUTTON) return ButtonDown[0];
+	if (vk == VK_RBUTTON) return ButtonDown[1];
+	if (vk == VK_MBUTTON) return ButtonDown[2];
 	return 0;
 }
 
@@ -324,6 +327,8 @@ static void Post(UINT message, WPARAM w, LPARAM l)
 	Queue.push_back(m);
 }
 
+static void Queue_Button(int b, bool down, int x, int y);
+
 static void Translate_SDL_Event(SDL_Event const &e)
 {
 	switch (e.type) {
@@ -346,15 +351,12 @@ static void Translate_SDL_Event(SDL_Event const &e)
 			break;
 		case SDL_MOUSEBUTTONDOWN:
 		case SDL_MOUSEBUTTONUP: {
-			bool down = (e.type == SDL_MOUSEBUTTONDOWN);
-			MouseX = e.button.x;
-			MouseY = e.button.y;
-			UINT msg;
-			if (e.button.button == SDL_BUTTON_LEFT) msg = down ? WM_LBUTTONDOWN : WM_LBUTTONUP;
-			else if (e.button.button == SDL_BUTTON_RIGHT) msg = down ? WM_RBUTTONDOWN : WM_RBUTTONUP;
-			else if (e.button.button == SDL_BUTTON_MIDDLE) msg = down ? WM_MBUTTONDOWN : WM_MBUTTONUP;
+			int b;
+			if (e.button.button == SDL_BUTTON_LEFT) b = 0;
+			else if (e.button.button == SDL_BUTTON_RIGHT) b = 1;
+			else if (e.button.button == SDL_BUTTON_MIDDLE) b = 2;
 			else break;
-			Post(msg, 0, MAKELONG(MouseX, MouseY));
+			Queue_Button(b, e.type == SDL_MOUSEBUTTONDOWN, e.button.x, e.button.y);
 			break;
 		}
 		default:
@@ -448,14 +450,64 @@ static void Run_Script(void)
 		} else {
 			MouseX = e.X;
 			MouseY = e.Y;
+			if (e.Message == WM_LBUTTONDOWN || e.Message == WM_LBUTTONUP) ButtonDown[0] = (e.Message == WM_LBUTTONDOWN);
+			if (e.Message == WM_RBUTTONDOWN || e.Message == WM_RBUTTONUP) ButtonDown[1] = (e.Message == WM_RBUTTONDOWN);
 			Post(e.Message, 0, MAKELONG(e.X, e.Y));
 		}
 	}
 }
 #endif
 
+/*
+** A press is always delivered at once. A release that follows its press
+** within MIN_CLICK_MS is held back until the press has been visible that
+** long: the game notices a press on its next frame and then asks whether the
+** button is still down (Westwood gadgets act on press-then-release), which a
+** click shorter than a frame -- a trackpad tap -- would otherwise fail.
+*/
+#define MIN_CLICK_MS 60.0
+struct PendingButton { int Button; bool Down; int X, Y; double Due; };
+static std::deque<PendingButton> PendingButtons;
+static double LastPress[3] = { -1e9, -1e9, -1e9 };
+
+static void Deliver_Button(int b, bool down, int x, int y)
+{
+	static UINT const msgs[3][2] = {
+		{ WM_LBUTTONUP, WM_LBUTTONDOWN }, { WM_RBUTTONUP, WM_RBUTTONDOWN }, { WM_MBUTTONUP, WM_MBUTTONDOWN }
+	};
+	ButtonDown[b] = down;
+	MouseX = x;
+	MouseY = y;
+	Post(msgs[b][down ? 1 : 0], 0, MAKELONG(x, y));
+	if (down) LastPress[b] = Now_Ms();
+}
+
+static void Queue_Button(int b, bool down, int x, int y)
+{
+	double due = Now_Ms();
+	if (!down) due = LastPress[b] + MIN_CLICK_MS;
+	if (PendingButtons.empty() && due <= Now_Ms()) {
+		Deliver_Button(b, down, x, y);
+	} else {
+		PendingButton p = { b, down, x, y, due };
+		PendingButtons.push_back(p);
+	}
+}
+
+static void Release_Pending_Buttons(void)
+{
+	while (!PendingButtons.empty()) {
+		PendingButton p = PendingButtons.front();
+		double due = p.Down ? 0 : LastPress[p.Button] + MIN_CLICK_MS;
+		if (due > Now_Ms()) break;
+		PendingButtons.pop_front();
+		Deliver_Button(p.Button, p.Down, p.X, p.Y);
+	}
+}
+
 static void Pump_SDL(void)
 {
+	Release_Pending_Buttons();
 #ifdef WEBCANDC_HEADLESS
 	Run_Script();
 	return;

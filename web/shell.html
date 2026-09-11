@@ -177,6 +177,16 @@
   loaderEl.addEventListener('drop', function (e) { handle(e.dataTransfer.files); });
 
   canvasEl.addEventListener('mousedown', function () { canvasEl.focus(); });
+  // SDL's Emscripten backend ignores a button event's position and uses the last
+  // mousemove's. A press that arrives without a move first (a tap, a click right
+  // after the window regains focus) would land where the pointer used to be, so
+  // hand SDL a move to the press position before it sees the press.
+  window.addEventListener('mousedown', function (e) {
+    if (e.target !== canvasEl) return;
+    canvasEl.dispatchEvent(new MouseEvent('mousemove', {
+      bubbles: true, clientX: e.clientX, clientY: e.clientY, screenX: e.screenX, screenY: e.screenY
+    }));
+  }, true);
   window.addEventListener('keydown', function (e) {
     if (!loaderEl.hidden) return;
     if (['Tab', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', ' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace'].indexOf(e.key) >= 0) e.preventDefault();

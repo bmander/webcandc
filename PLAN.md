@@ -20,6 +20,7 @@ Things learned along the way (beyond the original risk list):
 - Watcom-tolerated undefined behaviour clang exploits: writes into a `static const` array (tooltip refresh list).
 - The freeware CONQUER.ENG predates v1.07's strings; out-of-range text numbers fall back to CONQUER.H's English.
 - The OpenRA data package lacks the Win95 fonts (UPDATE.MIX); the disc's INSTALL/SETUP.Z (InstallShield 3) holds them.
+- SDL2's Emscripten backend gives a button event the last mousemove's position, not the click's; the shell sends a move first. Westwood buttons act on press-then-release and ask whether the button is still down, so the platform layer holds a release until its press has been visible for 60 ms (a tap shorter than a frame otherwise did nothing).
 
 Known issues:
 - Nod-campaign movies live on the Nod disc (a second MOVIES.MIX); only the GDI disc is supported so far.
