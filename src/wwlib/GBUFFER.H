@@ -1111,9 +1111,9 @@ inline void GraphicViewPortClass::Draw_Stamp(void const * icondata, int icon, in
 			if (cache_index != -1){
 				if (CachedIcons[cache_index].Get_Is_Cached()  ){
 					CachedIcons[cache_index].Draw_It (GraphicBuff->Get_DD_Surface() , x_pixel, y_pixel,
-																WindowList[clip_window][WINDOWX] + XPos,
+																(WindowList[clip_window][WINDOWX] << 3) + XPos,
 																WindowList[clip_window][WINDOWY] +YPos,
-																WindowList[clip_window][WINDOWWIDTH],
+																WindowList[clip_window][WINDOWWIDTH] << 3,
 																WindowList[clip_window][WINDOWHEIGHT]);
 					CachedIconsDrawn++;
                drewit = 1;
@@ -1126,7 +1126,10 @@ inline void GraphicViewPortClass::Draw_Stamp(void const * icondata, int icon, in
    if (drewit == 0) {
 		if (Lock()){
 			UnCachedIconsDrawn++;
-			Buffer_Draw_Stamp_Clip(this, icondata, icon, x_pixel, y_pixel, remap, WindowList[clip_window][WINDOWX], WindowList[clip_window][WINDOWY], WindowList[clip_window][WINDOWWIDTH], WindowList[clip_window][WINDOWHEIGHT]);
+			// webcandc: Tiberian Dawn keeps window X and width in 8-pixel units (JSHELL.CPP
+			// Set_Window, and CC_Draw_Shape shifts them back); this header came from the
+			// Red Alert-era library, where they are pixels. Shift them here as TD does.
+			Buffer_Draw_Stamp_Clip(this, icondata, icon, x_pixel, y_pixel, remap, WindowList[clip_window][WINDOWX] << 3, WindowList[clip_window][WINDOWY], WindowList[clip_window][WINDOWWIDTH] << 3, WindowList[clip_window][WINDOWHEIGHT]);
 		}
    }
 	Unlock();
