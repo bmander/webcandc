@@ -1,5 +1,10 @@
 // webcandc: JavaScript helpers linked with --js-library.
 addToLibrary({
+  // After the game writes a file: let the page persist it (IndexedDB), if it keeps data there.
+  webcandc_persist: function () {
+    if (typeof Module !== 'undefined' && Module.webcandcPersist) Module.webcandcPersist();
+  },
+
   // Headless (node) harness: contents of the $WEBCANDC_SCRIPT input script,
   // as a malloc'd C string (or 0 when there is none).
   webcandc_read_script: function () {

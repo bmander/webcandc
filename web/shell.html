@@ -5,36 +5,180 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Command &amp; Conquer — WebAssembly</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; color: #9aa88f; font: 14px/1.4 ui-monospace, Menlo, Consolas, monospace; }
-  body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
-  #frame { position: relative; width: min(100vw, 160vh); aspect-ratio: 8 / 5; }
+  :root { --ground: #0b0d0a; --ink: #c9d2bf; --dim: #7d8874; --accent: #d9a521; --panel: #151a13; --rule: #2a3226; }
+  html, body { margin: 0; height: 100%; background: var(--ground); color: var(--ink); font: 15px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  body { display: flex; align-items: center; justify-content: center; padding: 0 16px; box-sizing: border-box; }
+  #frame { position: relative; width: min(100%, 160vh); aspect-ratio: 8 / 5; }
   canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; outline: none; cursor: none; background: #000; }
-  #status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
-  #status[hidden] { display: none; }
+  #status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; color: var(--dim); }
+  #loader { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--ground); }
+  #loader .panel { max-width: 34rem; padding: 24px 28px; background: var(--panel); border: 1px solid var(--rule); border-top: 3px solid var(--accent); }
+  #loader h1 { margin: 0 0 12px; font-size: 18px; color: var(--accent); letter-spacing: .04em; text-transform: uppercase; }
+  #loader p { margin: 0 0 12px; }
+  #loader .dim { color: var(--dim); font-size: 13px; }
+  #loader label.button { display: inline-block; margin: 6px 8px 6px 0; padding: 8px 14px; border: 1px solid var(--accent); color: var(--accent); cursor: pointer; }
+  #loader label.button:hover, #loader label.button:focus-within { background: var(--accent); color: var(--ground); }
+  #loader input[type=file] { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  #loader .drop { margin-top: 10px; padding: 14px; border: 1px dashed var(--rule); text-align: center; color: var(--dim); }
+  #loader .drop.over { border-color: var(--accent); color: var(--ink); }
+  #loader #progress { min-height: 1.5em; color: var(--ink); }
+  #loader label.check { display: block; margin-top: 8px; font-size: 13px; color: var(--dim); }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <div id="frame">
   <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
   <div id="status">Loading…</div>
+  <div id="loader" hidden>
+    <div class="panel">
+      <h1>Command &amp; Conquer</h1>
+      <p>This is the 1995 game compiled to WebAssembly. It needs the game's data files, which you supply once; they stay in this browser.</p>
+      <p class="dim">EA released C&amp;C Gold as freeware in 2007. The GDI disc image (CNC95_GDI.iso) contains everything needed.</p>
+      <label class="button">Choose disc image (.iso)<input id="iso" type="file" accept=".iso"></label>
+      <label class="button">Choose .MIX files<input id="mixes" type="file" accept=".mix,.MIX,.ini,.INI" multiple></label>
+      <label class="check"><input id="movies" type="checkbox" checked> Include the movies (about 450 MB more in memory)</label>
+      <div class="drop" id="drop">…or drop the disc image or the files here</div>
+      <p id="progress"></p>
+    </div>
+  </div>
 </div>
 <script>
   var statusEl = document.getElementById('status');
   var canvasEl = document.getElementById('canvas');
+  var loaderEl = document.getElementById('loader');
+  var progressEl = document.getElementById('progress');
+  var REQUIRED = ['CONQUER.MIX', 'GENERAL.MIX', 'UPDATE.MIX', 'CCLOCAL.MIX', 'TEMPERAT.MIX'];
+  var persistTimer = 0;
+
   var Module = {
     canvas: canvasEl,
+    noInitialRun: true,
     print: function (t) { console.log(t); },
     printErr: function (t) { console.warn(t); },
-    setStatus: function (t) {
-      statusEl.textContent = t;
-      statusEl.hidden = !t;
+    setStatus: function (t) { statusEl.textContent = t; statusEl.hidden = !t; },
+    monitorRunDependencies: function (left) { if (!left) Module.setStatus(''); },
+    // Called by the game (library_webcandc.js) after it writes a file: keep save games.
+    webcandcPersist: function () {
+      if (!Module.webcandcIDB) return;
+      clearTimeout(persistTimer);
+      persistTimer = setTimeout(function () { FS.syncfs(false, function () {}); }, 1000);
     },
-    monitorRunDependencies: function (left) {
-      if (!left) Module.setStatus('');
+    onRuntimeInitialized: function () {
+      if (FS.analyzePath('/data/CONQUER.MIX').exists) { start(); return; }	// development build: data preloaded
+      if (!FS.analyzePath('/data').exists) FS.mkdir('/data');
+      FS.mount(IDBFS, {}, '/data');
+      Module.webcandcIDB = true;
+      FS.syncfs(true, function () {
+        if (haveData()) start(); else askForData();
+      });
     }
   };
+
+  function haveData() {
+    return REQUIRED.every(function (n) { return FS.analyzePath('/data/' + n).exists; });
+  }
+
+  function start() {
+    loaderEl.hidden = true;
+    if (!FS.analyzePath('/data/CONQUER.INI').exists) FS.writeFile('/data/CONQUER.INI', FS.readFile('/defaults/CONQUER.INI'));
+    canvasEl.focus();
+    Module.callMain(['-CD.']);
+  }
+
+  function askForData() {
+    Module.setStatus('');
+    loaderEl.hidden = false;
+  }
+
+  function say(text) { progressEl.textContent = text; }
+
+  /*
+  ** ISO 9660: primary volume descriptor at sector 16; directory records hold
+  ** extent (LE u32 @2), size (LE u32 @10), flags (@25, 2 = directory), name.
+  */
+  async function readIso(file) {
+    async function bytes(offset, length) { return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer()); }
+    function u32(b, o) { return b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24) >>> 0; }
+    async function listDir(extent, size) {
+      var buf = await bytes(extent * 2048, size), out = [], o = 0;
+      while (o < buf.length) {
+        var len = buf[o];
+        if (!len) { o = (Math.floor(o / 2048) + 1) * 2048; continue; }
+        var nlen = buf[o + 32], name = '';
+        for (var i = 0; i < nlen; i++) name += String.fromCharCode(buf[o + 33 + i]);
+        name = name.split(';')[0].toUpperCase();
+        if (nlen === 1 && (buf[o + 33] === 0 || buf[o + 33] === 1)) name = '';
+        if (name) out.push({ name: name, extent: u32(buf, o + 2), size: u32(buf, o + 10), dir: (buf[o + 25] & 2) !== 0 });
+        o += len;
+      }
+      return out;
+    }
+    var pvd = await bytes(16 * 2048, 2048);
+    if (String.fromCharCode(pvd[1], pvd[2], pvd[3], pvd[4], pvd[5]) !== 'CD001') throw new Error('That file is not an ISO disc image.');
+    var root = await listDir(u32(pvd, 156 + 2), u32(pvd, 156 + 10));
+    return { root: root, bytes: bytes, listDir: listDir };
+  }
+
+  async function importIso(file, withMovies) {
+    say('Reading the disc image…');
+    var iso = await readIso(file);
+    var mixes = iso.root.filter(function (e) { return !e.dir && /\.MIX$/.test(e.name) && (withMovies || e.name !== 'MOVIES.MIX'); });
+    for (var i = 0; i < mixes.length; i++) {
+      say('Copying ' + mixes[i].name + ' (' + (i + 1) + ' of ' + mixes.length + ')…');
+      FS.writeFile('/data/' + mixes[i].name, await iso.bytes(mixes[i].extent * 2048, mixes[i].size));
+    }
+    var install = iso.root.find(function (e) { return e.dir && e.name === 'INSTALL'; });
+    var setup = install && (await iso.listDir(install.extent, install.size)).find(function (e) { return e.name === 'SETUP.Z'; });
+    if (!setup) throw new Error('This disc image has no INSTALL/SETUP.Z; is it the C&C95 GDI or Nod disc?');
+    say('Unpacking the installer files…');
+    if (!FS.analyzePath('/tmp').exists) FS.mkdir('/tmp');
+    FS.writeFile('/tmp/SETUP.Z', await iso.bytes(setup.extent * 2048, setup.size));
+    var n = Module.ccall('webcandc_extract_setup_z', 'number', ['string', 'string', 'string'], ['/tmp/SETUP.Z', '/data', '.MIX']);
+    FS.unlink('/tmp/SETUP.Z');
+    if (n < 0) throw new Error('Could not unpack INSTALL/SETUP.Z from the disc image.');
+  }
+
+  async function importFiles(files) {
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i], name = f.name.toUpperCase();
+      if (!/\.(MIX|INI)$/.test(name)) continue;
+      say('Copying ' + name + '…');
+      FS.writeFile('/data/' + name, new Uint8Array(await f.arrayBuffer()));
+    }
+  }
+
+  async function handle(files) {
+    try {
+      var list = Array.prototype.slice.call(files);
+      var iso = list.find(function (f) { return /\.iso$/i.test(f.name); });
+      if (iso) await importIso(iso, document.getElementById('movies').checked);
+      else await importFiles(list);
+      if (!haveData()) {
+        var missing = REQUIRED.filter(function (n) { return !FS.analyzePath('/data/' + n).exists; });
+        say('Still missing: ' + missing.join(', ') + '.');
+        return;
+      }
+      say('Saving to this browser…');
+      FS.syncfs(false, function (err) {
+        if (err) { say('Could not save the files in this browser: ' + err); return; }
+        start();
+      });
+    } catch (e) {
+      say(e.message || String(e));
+    }
+  }
+
+  document.getElementById('iso').addEventListener('change', function (e) { handle(e.target.files); });
+  document.getElementById('mixes').addEventListener('change', function (e) { handle(e.target.files); });
+  var drop = document.getElementById('drop');
+  ['dragenter', 'dragover'].forEach(function (t) { loaderEl.addEventListener(t, function (e) { e.preventDefault(); drop.classList.add('over'); }); });
+  ['dragleave', 'drop'].forEach(function (t) { loaderEl.addEventListener(t, function (e) { e.preventDefault(); drop.classList.remove('over'); }); });
+  loaderEl.addEventListener('drop', function (e) { handle(e.dataTransfer.files); });
+
   canvasEl.addEventListener('mousedown', function () { canvasEl.focus(); });
   window.addEventListener('keydown', function (e) {
+    if (!loaderEl.hidden) return;
     if (['Tab', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', ' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace'].indexOf(e.key) >= 0) e.preventDefault();
   });
 </script>

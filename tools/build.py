@@ -35,6 +35,8 @@ LDFLAGS = [
     "-sFORCE_FILESYSTEM=1",
     "-sEXIT_RUNTIME=0",
     "-sENVIRONMENT=web",
+    "-lidbfs.js",
+    "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall",
 ]
 
 
@@ -67,7 +69,11 @@ def stale(src, obj):
 def compile_one(args):
     src, obj, cflags = args
     obj.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["em++", "-c", *cxxflags_for(src), *cflags, "-MMD", "-MF", str(obj.with_suffix(".d")), "-o", str(obj), str(src)]
+    if Path(src).suffix == ".c":
+        # Third-party C sources are compiled as plain C, without the 1995 environment.
+        cmd = ["emcc", "-c", *cflags, "-MMD", "-MF", str(obj.with_suffix(".d")), "-o", str(obj), str(src)]
+    else:
+        cmd = ["em++", "-c", *cxxflags_for(src), *cflags, "-MMD", "-MF", str(obj.with_suffix(".d")), "-o", str(obj), str(src)]
     p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, errors="replace")
     return src, p.returncode, p.stderr
 
@@ -114,6 +120,7 @@ def main():
     ap.add_argument("--headless", action="store_true", help="node test harness build")
     ap.add_argument("--undefined", action="store_true", help="report undefined symbols")
     ap.add_argument("--with-movies", action="store_true", help="package MOVIES.MIX and the VQA previews")
+    ap.add_argument("--no-data", action="store_true", help="player build: no game data packaged; the page asks for it")
     ap.add_argument("-j", type=int, default=os.cpu_count())
     a = ap.parse_args()
     config = "release" if a.release else ("headless" if a.headless else "debug")
@@ -152,8 +159,12 @@ def main():
     web.mkdir(parents=True, exist_ok=True)
     ldflags = [f for f in LDFLAGS if not (config == "headless" and f.startswith("-sENVIRONMENT"))]
     link = ["em++", *[str(j[1]) for j in jobs], *cfg["ldflags"], *ldflags,
-            "--preload-file", f"{stage}@/data",
+            "--preload-file", f"{ROOT / 'web' / 'CONQUER.INI'}@/defaults/CONQUER.INI",
             "--js-library", str(ROOT / "src" / "platform" / "library_webcandc.js")]
+    if not a.no_data:
+        link += ["--preload-file", f"{stage}@/data"]
+    if config != "headless":
+        link.append("-sINVOKE_RUN=0")		# the page starts main once the data is in place
     if config == "headless":
         link += ["-o", str(web / "index.js")]
     else:

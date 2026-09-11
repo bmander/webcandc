@@ -17,6 +17,11 @@
 #include <errno.h>
 #include <stdlib.h>
 
+extern "C" void webcandc_persist(void);	// library_webcandc.js
+
+/* Handles opened for writing: when one closes, the page may persist the file. */
+static unsigned char WriteHandles[1024];
+
 extern "C" {
 
 int int386(int, union REGS *in, union REGS *out) { if (out && out != in) *out = *in; if (out) out->x.cflag = 1; return 0; }
@@ -80,6 +85,7 @@ unsigned _dos_open(const char *path, unsigned mode, int *handle)
 		*handle = -1;
 		return errno ? (unsigned)errno : 2;
 	}
+	if (access != 0 && fd < (int)sizeof(WriteHandles)) WriteHandles[fd] = 1;
 	*handle = fd;
 	return 0;
 }
@@ -92,11 +98,19 @@ unsigned _dos_creat(const char *dos_path, unsigned, int *handle)
 		*handle = -1;
 		return errno ? (unsigned)errno : 5;
 	}
+	if (fd < (int)sizeof(WriteHandles)) WriteHandles[fd] = 1;
 	*handle = fd;
 	return 0;
 }
 
-unsigned _dos_close(int handle) { return close(handle) == 0 ? 0 : 6; }
+unsigned _dos_close(int handle)
+{
+	bool written = handle >= 0 && handle < (int)sizeof(WriteHandles) && WriteHandles[handle];
+	if (written) WriteHandles[handle] = 0;
+	unsigned rc = close(handle) == 0 ? 0 : 6;
+	if (written) webcandc_persist();
+	return rc;
+}
 
 unsigned _dos_read(int handle, void *buf, unsigned count, unsigned *bytes)
 {

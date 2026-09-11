@@ -100,5 +100,6 @@ def _sources(group="all"):
         out += sorted(p for p in (ROOT / "src/wwlib").iterdir() if p.suffix in (".CPP", ".cpp"))
     if group in ("platform", "all"):
         out += sorted((ROOT / "src/platform").glob("*.cpp"))
+        out += sorted((ROOT / "src/platform").glob("*.c"))		# third-party C (blast.c)
         out += sorted((ROOT / "src/compat").glob("*.cpp"))
     return out
