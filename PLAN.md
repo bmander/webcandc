@@ -10,7 +10,7 @@
 | M4 GDI mission 1, no sound | done — mission plays; selection/mouse work in Chrome |
 | M5 audio | done — Westwood SOUNDIO on DirectSound-over-SDL; Web Audio verified in Chrome |
 | M6 movies | done — WINVQ player; intro and GDI briefings play in Chrome with sound |
-| M7 ship | in progress — player build (`--release --no-data`) asks for the freeware disc image and keeps data in IndexedDB; verified in Chrome: GDI 1 → save → reload page → load → victory → score screen → campaign map → GDI 2 briefing and mission; 60 fps page, 3 long tasks in 4½ minutes (longest 153 ms, during loads) |
+| M7 ship | done — hosted at https://bmander.github.io/webcandc/ (`tools/deploy_pages.py`): the page downloads the core data and music (65 MB) once into IndexedDB; movies come from the player's own disc image; verified in Chrome: GDI 1 → save → reload page → load → victory → score screen → campaign map → GDI 2 briefing and mission; 60 fps page, 3 long tasks in 4½ minutes (longest 153 ms, during loads) |
 
 Things learned along the way (beyond the original risk list):
 - The Remastered WIN32LIB had video mode, keyboard handler and mouse drawing stubbed out; restored from the 1995 bodies left under `#if 0`.
