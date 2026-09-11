@@ -10,13 +10,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from buildflags import CXXFLAGS, sources  # noqa: E402
+from buildflags import cxxflags_for, sources  # noqa: E402
 
 ERR = re.compile(r"^(?P<file>[^:\n]+):(?P<line>\d+):\d+: (?:fatal )?error: (?P<msg>.*)$", re.M)
 
 
 def run(src):
-    cmd = ["em++", "-fsyntax-only", "-ferror-limit=0", *CXXFLAGS, str(src)]
+    cmd = ["em++", "-fsyntax-only", "-ferror-limit=0", *cxxflags_for(src), str(src)]
     p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", cwd=ROOT)
     return src, p.returncode, p.stderr
 

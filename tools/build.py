@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from buildflags import CXXFLAGS, sources  # noqa: E402
+from buildflags import cxxflags_for, sources  # noqa: E402
 
 CONFIGS = {
     "debug": {"cflags": ["-O1", "-g"], "ldflags": ["-O1", "-g", "-sASSERTIONS=1"]},
@@ -67,7 +67,7 @@ def stale(src, obj):
 def compile_one(args):
     src, obj, cflags = args
     obj.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["em++", "-c", *CXXFLAGS, *cflags, "-MMD", "-MF", str(obj.with_suffix(".d")), "-o", str(obj), str(src)]
+    cmd = ["em++", "-c", *cxxflags_for(src), *cflags, "-MMD", "-MF", str(obj.with_suffix(".d")), "-o", str(obj), str(src)]
     p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, errors="replace")
     return src, p.returncode, p.stderr
 
@@ -122,6 +122,15 @@ def main():
     cfg = CONFIGS[config]
     out = ROOT / "build" / config
     objdir = out / "obj"
+
+    # Changed compiler flags don't show up in file timestamps: rebuild everything.
+    stamp = out / "flags.txt"
+    signature = repr((cxxflags_for("x.cpp"), cxxflags_for("win32.cpp"), cfg["cflags"]))
+    if objdir.exists() and (not stamp.exists() or stamp.read_text() != signature):
+        print("[build] compiler flags changed; rebuilding all objects")
+        shutil.rmtree(objdir)
+    out.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(signature)
 
     srcs = sources("all")
     jobs = [(s, obj_path(objdir, s), cfg["cflags"]) for s in srcs]

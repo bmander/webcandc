@@ -32,6 +32,20 @@ CXXFLAGS = [
     *[f"-I{i}" for i in INCLUDES],
 ]
 
+# Watcom sized every enum to the smallest integer type that holds its values
+# (no -ei), and the game reads and writes structures containing enums straight
+# from disk (e.g. MapClass::Read_Binary's {TemplateType, TIcon} pairs), so the
+# 1995 code is built with -fshort-enums. Files that include SDL headers keep
+# natural enums: SDL's own structs contain enums and its library is prebuilt.
+# The Win32/DirectX structures shared between the two sides contain no enums.
+NATURAL_ENUM_FILES = {"win32.cpp", "ddraw.cpp", "dsound.cpp"}
+
+
+def cxxflags_for(src):
+    """Compiler flags for one translation unit."""
+    name = Path(src).name
+    return CXXFLAGS + ([] if name in NATURAL_ENUM_FILES else ["-fshort-enums"])
+
 # Files from the original MAKEFILE that we compile out entirely (DOS/IPX/modem/DDE).
 # Only the Greenleaf serial/modem code: IPX, Winsock and DDE compile against the
 # platform layer, which reports "no network" so the game disables those modes.
@@ -71,7 +85,10 @@ def sources(group="all"):
     stems) leaves files out, e.g. while a port of them is in progress."""
     skip = {x.strip().upper() for x in os.environ.get("WEBCANDC_EXCLUDE", "").split(",") if x.strip()}
     out = _sources(group)
-    return [p for p in out if p.stem.upper() not in skip]
+    out = [p for p in out if p.stem.upper() not in skip]
+    # $WEBCANDC_EXTRA (comma-separated paths) adds files, e.g. a stand-in.
+    out += [ROOT / x.strip() for x in os.environ.get("WEBCANDC_EXTRA", "").split(",") if x.strip()]
+    return out
 
 
 def _sources(group="all"):
