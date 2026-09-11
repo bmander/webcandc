@@ -737,7 +737,12 @@ inline int Lepton_To_Pixel(int lepton) {return ((lepton * ICON_PIXEL_W) + (ICON_
 inline int Pixel_To_Lepton(int pixel) {return ((pixel * ICON_LEPTON_W) + (ICON_PIXEL_W / 2)) / ICON_PIXEL_W;}
 //inline FacingType Facing_To_8(DirType facing) {return (FacingType)(((unsigned char)(facing|0x10))>>5);}
 inline COORDINATE XYP_Coord(int x,int y) {return XY_Coord(Pixel_To_Lepton(x), Pixel_To_Lepton(y));};
+#ifdef WEBCANDC
+char const * WebCandC_Text_String(int string);	// webcandc: bounds-checked, with v1.07 strings the freeware CONQUER.ENG lacks
+inline char const * Text_String(int string) {return(WebCandC_Text_String(string));};
+#else
 inline char const * Text_String(int string) {return(Extract_String(SystemStrings, string));};
+#endif
 
 
 template<class T> inline T Random_Picky(T a, T b, char *sfile, int line)
