@@ -267,7 +267,7 @@ typedef struct LockedData {
 } LockedDataType;
 
 extern LockedDataType LockedData;
-#pragma pack(4);
+//#pragma pack(4);	// webcandc: keep the build-wide byte packing (prelude.h) so these headers lay out as everywhere else
 
 void Init_Locked_Data(void);
 long Simple_Copy(void ** source, long * ssize, void ** alternate, long * altsize, void **dest, long size);
