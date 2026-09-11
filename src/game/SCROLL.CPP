@@ -93,6 +93,30 @@ void ScrollClass::AI(KeyNumType &input, int x, int y)
 	static DirType direction;
 	bool				player_scrolled=false;
 
+#ifdef WEBCANDC
+	/*
+	**	webcandc mod: W, A, S and D scroll the map while held (two keys for a
+	**	diagonal), at the fastest speed the Scroll Rate option allows the mouse.
+	*/
+	if (!IsRubberBand) {
+		static FacingType const _keyfacing[3][3] = {
+			{FACING_NW,	FACING_N,		FACING_NE},
+			{FACING_W,		FACING_NONE,	FACING_E},
+			{FACING_SW,	FACING_S,		FACING_SE}
+		};
+		static int const _keyrate[9] = {0x01C0, 0x0180, 0x0140, 0x0100, 0x00C0, 0x0080, 0x0040, 0x0020, 0x0010};
+		// Keyboard::Down takes a Windows key code; KN_D and friends are the ASCII codes Get() returns.
+		int kx = (Keyboard::Down('D') ? 1 : 0) - (Keyboard::Down('A') ? 1 : 0);
+		int ky = (Keyboard::Down('S') ? 1 : 0) - (Keyboard::Down('W') ? 1 : 0);
+		FacingType facing = _keyfacing[ky+1][kx+1];
+		if (facing != FACING_NONE) {
+			int distance = _keyrate[Bound(Options.ScrollRate+1, 0, 8)];
+			Scroll_Map(Facing_Dir(facing), distance, true);
+		}
+	}
+#endif
+
+
 	/*
 	**	If rubber band mode is in progress, then don't allow scrolling of the tactical map.
 	*/

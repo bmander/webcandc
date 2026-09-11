@@ -640,7 +640,11 @@ void Keyboard_Process(KeyNumType &input)
 		/*
 		**	All selected units will go into idle mode.
 		*/
+#ifdef WEBCANDC
+		case VK_Q:		// webcandc mod: S scrolls the map (WASD), so Stop moves to Q
+#else
 		case VK_S:
+#endif
 			if (CurrentObject.Count()) {
 				for (int index = 0; index < CurrentObject.Count(); index++) {
 					ObjectClass const * tech = CurrentObject[index];

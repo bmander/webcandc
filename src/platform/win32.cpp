@@ -424,6 +424,10 @@ static void Load_Script(void)
 				e.Time += 30; e.Message = right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN; Script.push_back(e);
 				e.Time += 80; e.Message = right ? WM_RBUTTONUP : WM_LBUTTONUP; Script.push_back(e);
 			}
+		} else if (!strcmp(action, "hold") && sscanf(line, "%*f %*s %31s %d", arg, &x) == 2) {
+			int vk = Script_Key(arg);
+			e.Message = WM_KEYDOWN; e.WParam = vk; Script.push_back(e);
+			e.Time += x; e.Message = WM_KEYUP; Script.push_back(e);
 		} else if (!strcmp(action, "exit")) {
 			e.Exit = true; Script.push_back(e);
 		}

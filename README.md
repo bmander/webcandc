@@ -25,6 +25,10 @@ largely as they did in 1995.
 
 See `PLAN.md` for the port plan, status and the lessons learned along the way.
 
+One deliberate change to how the game plays: **W, A, S and D scroll the map** while held
+(`ScrollClass::AI` in `src/game/SCROLL.CPP`), at the Scroll Rate set in the game options. The
+Stop command, originally on S, moves to **Q**.
+
 ## Game data
 
 The game data is not included. EA released C&C Gold as freeware in 2007. The player build asks
@@ -83,7 +87,8 @@ WEBCANDC_FRAMES=/tmp/frames WEBCANDC_SCRIPT=/tmp/script.txt node --stack-size=40
 
 - `WEBCANDC_FRAMES` — directory for a PPM screen dump once a second.
 - `WEBCANDC_SCRIPT` — timed input, one event per line: `9000 click 160 200`, `12000 key ESCAPE`,
-  `15000 move 300 230`, `60000 exit` (milliseconds since start, game coordinates).
+  `15000 move 300 230`, `20000 hold D 2000` (key held for 2 s), `60000 exit` (milliseconds since
+  start, game coordinates).
 - `WEBCANDC_WAV` — capture the mixed audio to a WAV file.
 - stderr shows every string drawn (`[text]`), missing files, and a call-stack trace every five
   seconds.
