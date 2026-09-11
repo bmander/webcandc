@@ -197,7 +197,10 @@ enum GBC_Enum {
 /* Define the screen width and height to make portability to other modules	*/
 /*		easier.																					*/
 /*=========================================================================*/
-#define	DEFAULT_SCREEN_WIDTH		768
+// webcandc: 320 as in the 1995 library (the Remastered WIN32LIB has 768). Its only
+// user is the game's SysMemPage, the 320x200 buffer that WSA frames and VQA movies
+// are decoded into before being scaled 2x to the 640x400 screen.
+#define	DEFAULT_SCREEN_WIDTH		320
 #define	DEFAULT_SCREEN_HEIGHT	768
 
 /*=========================================================================*/
@@ -307,8 +310,24 @@ class GraphicViewPortClass {
 
 // PG_TO_FIX
 // This seems to be missing. Might not be needed anyway since it looks like it's only used for UI drawing. ST - 12/17/2018 6:11PM
+		// webcandc: implemented -- tiles the texture across the rectangle (CC_Texture_Fill's
+		// dialog backgrounds), copying every pixel as the disabled code in CONQUER.CPP did.
 		void Texture_Fill_Rect (int xpos, int ypos, int width, int height, void const *shape_pointer, int source_width, int source_height) {
-			return;
+			if (!shape_pointer || source_width <= 0 || source_height <= 0) return;
+			if (!Lock()) return;
+			unsigned char const *texture = (unsigned char const *)shape_pointer;
+			int stride = Width + XAdd + Pitch;
+			for (int y = 0; y < height; y++) {
+				int py = ypos + y;
+				if (py < 0 || py >= Height) continue;
+				unsigned char const *row = texture + (y % source_height) * source_width;
+				unsigned char *dest = (unsigned char *)Offset + py * stride;
+				for (int x = 0; x < width; x++) {
+					int px = xpos + x;
+					if (px >= 0 && px < Width) dest[px] = row[x % source_width];
+				}
+			}
+			Unlock();
 		}
 
 //	This doesnt seem to exist anywhere?? - Steve T 9/26/95 6:05PM
