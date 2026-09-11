@@ -971,7 +971,7 @@ bool Read_Object(void *ptr, int base_size, int class_size, FileClass & file, voi
 	**	Fill in VTable.
 	*/
 	if (vtable) {
-		((void **)(((char *)ptr) + base_size - 4))[0] = vtable;
+		Set_VTable(ptr, base_size, vtable);	// webcandc: was the Watcom-layout store, inline
 	}
 
 	return(true);
@@ -1199,7 +1199,17 @@ TechnoTypeClass const * Target_To_TechnoType(TARGET target)
  *=========================================================================*/
 void * Get_VTable(void *ptr, int base_size)
 {
+#ifdef WEBCANDC
+	/*
+	** webcandc: Watcom (-Vt) put the vtable pointer after the base class's data;
+	** clang (Itanium C++ ABI) puts it at the start of the object. The old offset
+	** is the AbstractClass IsActive bit-field word, so loads corrupted every object.
+	*/
+	base_size = base_size;
+	return(((void **)ptr)[0]);
+#else
 	return(((void **)(((char *)ptr) + base_size - 4))[0]);
+#endif
 }
 
 
@@ -1222,7 +1232,17 @@ void * Get_VTable(void *ptr, int base_size)
  *=========================================================================*/
 void Set_VTable(void *ptr, int base_size, void *vtable)
 {
+#ifdef WEBCANDC
+	/*
+	** webcandc: Watcom (-Vt) put the vtable pointer after the base class's data;
+	** clang (Itanium C++ ABI) puts it at the start of the object. The old offset
+	** is the AbstractClass IsActive bit-field word, so loads corrupted every object.
+	*/
+	base_size = base_size;
+	((void **)ptr)[0] = vtable;
+#else
 	((void **)(((char *)ptr) + base_size - 4))[0] = vtable;
+#endif
 }
 
 

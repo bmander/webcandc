@@ -418,7 +418,7 @@ void TerrainClass::Init(void)
 	Terrains.Free_All();
 
 	ptr = new TerrainClass();
-	VTable = ((void **)(((char *)ptr) + sizeof(AbstractClass) - 4))[0];
+	VTable = Get_VTable(ptr, sizeof(AbstractClass));	// webcandc: Get_VTable knows where the compiler keeps the vtable pointer
 	delete ptr;
 }
 

@@ -1979,7 +1979,7 @@ void BuildingClass::Init(void)
 	Buildings.Free_All();
 
 	ptr = new BuildingClass();
-	VTable = ((void **)(((char *)ptr) + sizeof(AbstractClass) - 4))[0];
+	VTable = Get_VTable(ptr, sizeof(AbstractClass));	// webcandc: Get_VTable knows where the compiler keeps the vtable pointer
 	delete ptr;
 }
 

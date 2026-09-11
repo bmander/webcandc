@@ -454,7 +454,7 @@ void AnimClass::Init(void)
 	Anims.Free_All();
 
 	ptr = new AnimClass();
-	VTable = ((void **)(((char *)ptr) + sizeof(AbstractClass) - 4))[0];
+	VTable = Get_VTable(ptr, sizeof(AbstractClass));	// webcandc: Get_VTable knows where the compiler keeps the vtable pointer
 	delete ptr;
 }
 
