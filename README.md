@@ -57,6 +57,21 @@ python3 tools/build.py --headless           # node test harness             -> b
 Add `--with-movies` to package `MOVIES.MIX` into a data-preloading build. Serve a `web`
 directory over HTTP (for example `python3 -m http.server`) and open `index.html`.
 
+## The hosted site
+
+`tools/deploy_pages.py` assembles `build/pages`: the player build plus the disc's data files
+without the movies (about 65 MB, music included) and a `data/manifest.json` listing them. A
+first-time visitor downloads those once into the browser's IndexedDB; the movies can be added
+from their own disc image. `--push origin` publishes `build/pages` as a single force-pushed
+commit on the `gh-pages` branch, so the game data never enters the source history.
+
+```sh
+python3 tools/build.py --release --no-data
+python3 tools/deploy_pages.py --push origin
+```
+
+This is an unofficial project, not affiliated with or endorsed by Electronic Arts.
+
 ## Testing without a browser
 
 The headless build runs the whole game under Node:

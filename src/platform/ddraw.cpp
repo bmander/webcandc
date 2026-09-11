@@ -458,7 +458,8 @@ extern "C" void WebCandC_Init(void)
 		fprintf(stderr, "[webcandc] SDL_Init failed: %s\n", SDL_GetError());
 		return;
 	}
-	Window = SDL_CreateWindow("Command & Conquer", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+	Window = SDL_CreateWindow("webcandc",	// also the browser tab title; an unofficial build may not use EA's trademark
+		SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
 		ModeWidth * 2, ModeHeight * 2, SDL_WINDOW_RESIZABLE);
 	Renderer = SDL_CreateRenderer(Window, -1, 0);
 	SDL_SetRenderDrawColor(Renderer, 0, 0, 0, 255);

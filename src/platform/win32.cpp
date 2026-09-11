@@ -484,6 +484,16 @@ static void Deliver_Button(int b, bool down, int x, int y)
 
 static void Queue_Button(int b, bool down, int x, int y)
 {
+	/*
+	** A release whose press the game never saw -- the end of the click on the
+	** page's "play" button, say -- would reach whatever gadget lies under it.
+	*/
+	bool press_pending = false;
+	for (size_t i = 0; i < PendingButtons.size(); i++) {
+		if (PendingButtons[i].Button == b) press_pending = PendingButtons[i].Down;
+	}
+	if (!down && !ButtonDown[b] && !press_pending) return;
+
 	double due = Now_Ms();
 	if (!down) due = LastPress[b] + MIN_CLICK_MS;
 	if (PendingButtons.empty() && due <= Now_Ms()) {

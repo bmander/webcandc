@@ -3,26 +3,33 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Command &amp; Conquer — WebAssembly</title>
+<title>webcandc</title>
 <style>
   :root { --ground: #0b0d0a; --ink: #c9d2bf; --dim: #7d8874; --accent: #d9a521; --panel: #151a13; --rule: #2a3226; }
   html, body { margin: 0; height: 100%; background: var(--ground); color: var(--ink); font: 15px/1.5 ui-monospace, Menlo, Consolas, monospace; }
-  body { display: flex; align-items: center; justify-content: center; padding: 0 16px; box-sizing: border-box; }
-  #frame { position: relative; width: min(100%, 160vh); aspect-ratio: 8 / 5; }
-  canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; outline: none; cursor: none; background: #000; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 0 16px; box-sizing: border-box; }
+  #frame { position: relative; width: min(100%, calc((100vh - 36px) * 1.6)); aspect-ratio: 8 / 5; }
+  /* Out of flow, so the pixel size SDL gives the canvas cannot stretch the frame. */
+  canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; image-rendering: pixelated; outline: none; cursor: none; background: #000; }
   #status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; color: var(--dim); }
-  #loader { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--ground); }
-  #loader .panel { max-width: 34rem; padding: 24px 28px; background: var(--panel); border: 1px solid var(--rule); border-top: 3px solid var(--accent); }
+  #loader { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; overflow: auto; background: var(--ground); }
+  #loader .panel { max-width: 36rem; padding: 24px 28px; background: var(--panel); border: 1px solid var(--rule); border-top: 3px solid var(--accent); }
   #loader h1 { margin: 0 0 12px; font-size: 18px; color: var(--accent); letter-spacing: .04em; text-transform: uppercase; }
   #loader p { margin: 0 0 12px; }
-  #loader .dim { color: var(--dim); font-size: 13px; }
-  #loader label.button { display: inline-block; margin: 6px 8px 6px 0; padding: 8px 14px; border: 1px solid var(--accent); color: var(--accent); cursor: pointer; }
-  #loader label.button:hover, #loader label.button:focus-within { background: var(--accent); color: var(--ground); }
-  #loader input[type=file] { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .dim { color: var(--dim); font-size: 13px; }
+  .button { display: inline-block; margin: 6px 8px 6px 0; padding: 8px 14px; border: 1px solid var(--accent); background: none; color: var(--accent); font: inherit; cursor: pointer; }
+  .button:hover, .button:focus-visible, .button:focus-within { background: var(--accent); color: var(--ground); }
+  .button:disabled { opacity: .5; cursor: default; background: none; color: var(--accent); }
+  input[type=file] { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  #loader details { margin-top: 8px; }
+  #loader summary { cursor: pointer; color: var(--dim); }
   #loader .drop { margin-top: 10px; padding: 14px; border: 1px dashed var(--rule); text-align: center; color: var(--dim); }
   #loader .drop.over { border-color: var(--accent); color: var(--ink); }
-  #loader #progress { min-height: 1.5em; color: var(--ink); }
+  #progress { min-height: 1.5em; margin-top: 12px; color: var(--ink); }
   #loader label.check { display: block; margin-top: 8px; font-size: 13px; color: var(--dim); }
+  footer { font-size: 12px; color: var(--dim); text-align: center; }
+  footer a, footer label { color: var(--dim); text-decoration: underline; cursor: pointer; }
+  footer a:hover, footer label:hover { color: var(--ink); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -32,24 +39,41 @@
   <div id="status">Loading…</div>
   <div id="loader" hidden>
     <div class="panel">
-      <h1>Command &amp; Conquer</h1>
-      <p>This is the 1995 game compiled to WebAssembly. It needs the game's data files, which you supply once; they stay in this browser.</p>
-      <p class="dim">EA released C&amp;C Gold as freeware in 2007. The GDI disc image (CNC95_GDI.iso) contains everything needed.</p>
-      <label class="button">Choose disc image (.iso)<input id="iso" type="file" accept=".iso"></label>
-      <label class="button">Choose .MIX files<input id="mixes" type="file" accept=".mix,.MIX,.ini,.INI" multiple></label>
-      <label class="check"><input id="movies" type="checkbox" checked> Include the movies (about 450 MB more in memory)</label>
-      <div class="drop" id="drop">…or drop the disc image or the files here</div>
-      <p id="progress"></p>
+      <h1>webcandc</h1>
+      <p>The 1995 real-time strategy game, rebuilt from the source code Electronic Arts released under the GPL and running in your browser.</p>
+      <div id="hosted" hidden>
+        <button id="play" class="button">Download the game data and play</button>
+        <p class="dim"><span id="size">About 65 MB</span>, downloaded once and kept in this browser, with the music. The movies are not included; add them from your own disc image with the link under the game.</p>
+      </div>
+      <details id="own">
+        <summary>Use your own disc image instead</summary>
+        <p class="dim">EA released C&amp;C Gold as freeware in 2007. The GDI disc image (CNC95_GDI.iso) contains everything, movies included.</p>
+        <label class="button">Choose disc image (.iso)<input id="iso" type="file" accept=".iso"></label>
+        <label class="button">Choose .MIX files<input id="mixes" type="file" accept=".mix,.MIX,.ini,.INI" multiple></label>
+        <label class="check"><input id="movies" type="checkbox" checked> Include the movies (about 450 MB more in memory)</label>
+        <div class="drop" id="drop">…or drop the disc image or the files here</div>
+      </details>
+      <p id="progress" role="status"></p>
     </div>
   </div>
 </div>
+<footer>
+  webcandc · unofficial; not affiliated with or endorsed by Electronic Arts ·
+  <span id="links" hidden><a id="source" href="#">source</a> · <a href="LICENSE.md">licence</a> · </span>
+  <label>add the movies from a disc image<input id="moviesiso" type="file" accept=".iso"></label>
+  <span id="footnote"></span>
+</footer>
 <script>
   var statusEl = document.getElementById('status');
   var canvasEl = document.getElementById('canvas');
   var loaderEl = document.getElementById('loader');
   var progressEl = document.getElementById('progress');
+  var footnoteEl = document.getElementById('footnote');
   var REQUIRED = ['CONQUER.MIX', 'GENERAL.MIX', 'UPDATE.MIX', 'CCLOCAL.MIX', 'TEMPERAT.MIX'];
   var persistTimer = 0;
+
+  // A hosted build ships the game data next to the page, listed in data/manifest.json.
+  var manifestReady = fetch('data/manifest.json').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
 
   var Module = {
     canvas: canvasEl,
@@ -70,7 +94,14 @@
       FS.mount(IDBFS, {}, '/data');
       Module.webcandcIDB = true;
       FS.syncfs(true, function () {
-        if (haveData()) start(); else askForData();
+        manifestReady.then(function (manifest) {
+          Module.webcandcManifest = manifest;
+          if (manifest && manifest.source) {
+            document.getElementById('source').href = manifest.source;
+            document.getElementById('links').hidden = false;
+          }
+          if (haveData()) start(); else askForData(manifest);
+        });
       });
     }
   };
@@ -86,12 +117,54 @@
     Module.callMain(['-CD.']);
   }
 
-  function askForData() {
+  function askForData(manifest) {
     Module.setStatus('');
+    if (manifest) {
+      var total = manifest.files.reduce(function (sum, f) { return sum + f.size; }, 0);
+      document.getElementById('size').textContent = 'About ' + Math.round(total / 1e6) + ' MB';
+      document.getElementById('hosted').hidden = false;
+    } else {
+      document.getElementById('own').open = true;
+    }
     loaderEl.hidden = false;
   }
 
   function say(text) { progressEl.textContent = text; }
+
+  // Keep what was copied into /data in this browser (IndexedDB), then run.
+  function finish() {
+    if (!haveData()) {
+      var missing = REQUIRED.filter(function (n) { return !FS.analyzePath('/data/' + n).exists; });
+      say('Still missing: ' + missing.join(', ') + '.');
+      return;
+    }
+    say('Saving to this browser…');
+    FS.syncfs(false, function (err) {
+      if (err) { say('Could not save the files in this browser: ' + err); return; }
+      start();
+    });
+  }
+
+  async function downloadData(manifest) {
+    var total = manifest.files.reduce(function (sum, f) { return sum + f.size; }, 0), done = 0;
+    for (var i = 0; i < manifest.files.length; i++) {
+      var f = manifest.files[i];
+      var response = await fetch('data/' + f.name);
+      if (!response.ok) throw new Error('Could not download ' + f.name + ' (HTTP ' + response.status + '). Reload the page to try again.');
+      var reader = response.body.getReader(), buf = new Uint8Array(f.size), at = 0;
+      for (;;) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        if (at + chunk.value.length > buf.length) throw new Error(f.name + ' is larger than the site says; reload the page to try again.');
+        buf.set(chunk.value, at);
+        at += chunk.value.length;
+        say('Downloading the game data: ' + Math.round((done + at) / 1e6) + ' of ' + Math.round(total / 1e6) + ' MB…');
+      }
+      if (at !== f.size) throw new Error(f.name + ' arrived incomplete; reload the page to try again.');
+      done += f.size;
+      FS.writeFile('/data/' + f.name, buf);
+    }
+  }
 
   /*
   ** ISO 9660: primary volume descriptor at sector 16; directory records hold
@@ -154,23 +227,42 @@
       var iso = list.find(function (f) { return /\.iso$/i.test(f.name); });
       if (iso) await importIso(iso, document.getElementById('movies').checked);
       else await importFiles(list);
-      if (!haveData()) {
-        var missing = REQUIRED.filter(function (n) { return !FS.analyzePath('/data/' + n).exists; });
-        say('Still missing: ' + missing.join(', ') + '.');
-        return;
-      }
-      say('Saving to this browser…');
-      FS.syncfs(false, function (err) {
-        if (err) { say('Could not save the files in this browser: ' + err); return; }
-        start();
-      });
+      finish();
     } catch (e) {
       say(e.message || String(e));
     }
   }
 
+  // The game looks for MOVIES.MIX when it starts, so reload once the movies are stored.
+  async function addMovies(file) {
+    try {
+      if (!Module.webcandcIDB) throw new Error('This build already has its data built in.');
+      footnoteEl.textContent = '· reading the disc image…';
+      var iso = await readIso(file);
+      var movies = iso.root.find(function (e) { return !e.dir && e.name === 'MOVIES.MIX'; });
+      if (!movies) throw new Error('That disc image has no MOVIES.MIX.');
+      footnoteEl.textContent = '· copying the movies (about 450 MB)…';
+      FS.writeFile('/data/MOVIES.MIX', await iso.bytes(movies.extent * 2048, movies.size));
+      footnoteEl.textContent = '· saving to this browser…';
+      FS.syncfs(false, function (err) {
+        if (err) { footnoteEl.textContent = '· could not save the movies: ' + err; return; }
+        location.reload();
+      });
+    } catch (e) {
+      footnoteEl.textContent = '· ' + (e.message || String(e));
+    }
+  }
+
+  document.getElementById('play').addEventListener('click', function (e) {
+    e.target.disabled = true;
+    downloadData(Module.webcandcManifest).then(finish, function (err) {
+      say(err.message || String(err));
+      e.target.disabled = false;
+    });
+  });
   document.getElementById('iso').addEventListener('change', function (e) { handle(e.target.files); });
   document.getElementById('mixes').addEventListener('change', function (e) { handle(e.target.files); });
+  document.getElementById('moviesiso').addEventListener('change', function (e) { if (e.target.files[0]) addMovies(e.target.files[0]); });
   var drop = document.getElementById('drop');
   ['dragenter', 'dragover'].forEach(function (t) { loaderEl.addEventListener(t, function (e) { e.preventDefault(); drop.classList.add('over'); }); });
   ['dragleave', 'drop'].forEach(function (t) { loaderEl.addEventListener(t, function (e) { e.preventDefault(); drop.classList.remove('over'); }); });
