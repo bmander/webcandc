@@ -87,9 +87,10 @@ class WCSurface : public IDirectDrawSurface
 		WCPalette *Palette;
 		DDCOLORKEY SrcKey;
 		ULONG Refs;
+		int Locks;
 
 		WCSurface(DWORD w, DWORD h, bool primary) :
-			Width(w), Height(h), Pitch((LONG)w), Primary(primary), Palette(NULL), Refs(1)
+			Width(w), Height(h), Pitch((LONG)w), Primary(primary), Palette(NULL), Refs(1), Locks(0)
 		{
 			Pixels = (unsigned char *)calloc(1, (size_t)w * h);
 			SrcKey.dwColorSpaceLowValue = 0;
@@ -238,6 +239,12 @@ class WCSurface : public IDirectDrawSurface
 			if (rect) p += rect->top * Pitch + rect->left;
 			desc->lpSurface = p;
 			desc->dwFlags |= DDSD_LPSURFACE;
+			/*
+			** The game may keep the visible page locked while it draws for a long
+			** time (dialogs). Anything locked may change: present it.
+			*/
+			Locks++;
+			if (Primary) ScreenDirty = true;
 			return DD_OK;
 		}
 
@@ -264,6 +271,7 @@ class WCSurface : public IDirectDrawSurface
 
 		STDMETHOD(Unlock)(LPVOID)
 		{
+			if (Locks > 0) Locks--;
 			if (Primary) ScreenDirty = true;
 			return DD_OK;
 		}
@@ -401,7 +409,7 @@ extern "C" void WebCandC_Present(void)
 #else
 	if (!ScreenDirty || !PrimarySurface || !Texture) return;
 #endif
-	ScreenDirty = false;
+	ScreenDirty = PrimarySurface->Locks > 0;	// still being drawn into: present again next time
 
 	unsigned int lut[256];
 	for (int i = 0; i < 256; i++) {

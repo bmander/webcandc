@@ -49,7 +49,7 @@
 // MEG - 11.28.95 - added for debug
 extern void Debug_Printf( char *format_string, ... );
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(WEBCANDC)	/* webcandc: C&C95's build (Watcom) configuration: no mono output */
 #define VQASTANDALONE 0  /* Stand alone player */
 #define VQAVOC_ON     0  /* Enable VOC file override */
 #define	VQAMONO_ON    0  /* Mono display output enable/disable */

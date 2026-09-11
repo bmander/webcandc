@@ -38,7 +38,7 @@
 *
 ****************************************************************************/
 
-#ifndef __WATCOMC__
+#if !defined(__WATCOMC__) && !defined(WEBCANDC)	/* webcandc: C&C95's build (Watcom) configuration */
 #include <pharlap.h>
 #else
 #include "realmode.h"

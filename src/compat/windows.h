@@ -529,6 +529,7 @@ HANDLE WINAPI GetCurrentProcess(void);
 HANDLE WINAPI GetCurrentThread(void);
 DWORD WINAPI GetCurrentThreadId(void);
 BOOL WINAPI SetPriorityClass(HANDLE process, DWORD cls);
+DWORD WINAPI GetPriorityClass(HANDLE process);
 BOOL WINAPI SetThreadPriority(HANDLE thread, int priority);
 HANDLE WINAPI CreateThread(LPSECURITY_ATTRIBUTES sa, DWORD stack, LPTHREAD_START_ROUTINE start, LPVOID param, DWORD flags, LPDWORD id);
 HANDLE WINAPI CreateEvent(LPSECURITY_ATTRIBUTES sa, BOOL manual, BOOL initial, LPCSTR name);

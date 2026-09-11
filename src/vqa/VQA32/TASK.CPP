@@ -63,10 +63,10 @@
 #include <dos.h>
 #include <mem.h>
 #include <conio.h>
-#include <sys\timeb.h>
-#include <vqm32\all.h>
+#include <sys/timeb.h>
+#include <vqm32/all.h>
 #include "vqaplayp.h"
-#include <vqm32\font.h>
+#include <vqm32/font.h>
 
 /*---------------------------------------------------------------------------
  * PRIVATE DECLARATIONS
@@ -420,6 +420,14 @@ long VQA_Play(VQAHandle *vqa, long mode)
 					VQA_UpdateMono((VQAHandleP *)vqa);
 				}
 				#endif
+
+				/* webcandc: under Win95 the DirectSound refill (AudioCallback) ran
+				 * on a multimedia-timer thread while this loop spun. Here nothing
+				 * else runs unless the loop calls into the platform: fire due
+				 * timers, pump input and, every ~15 ms, let the browser run and
+				 * present the screen.
+				 */
+				WebCandC_Service();
 
 				if (mode == VQAMODE_WALK) {
 					break;

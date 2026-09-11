@@ -42,9 +42,9 @@
 *
 ****************************************************************************/
 
-#include <vqm32\video.h>
-#include <vqm32\soscomp.h>
-#include <vqm32\captoken.h>
+#include <vqm32/video.h>
+#include <vqm32/soscomp.h>
+#include <vqm32/captoken.h>
 #include "vqafile.h"
 #include "vqaplay.h"
 #include "caption.h"
@@ -63,9 +63,10 @@ extern HWND MainWindow;
 
 /* Internal library version. */
 #define VQA_VERSION "2.42"
-#define VQA_DATE    __DATE__" "__TIME__
+/* webcandc: spaces between the spliced literals (C++11 reads "x"__TIME__ as a literal suffix) */
+#define VQA_DATE    __DATE__ " " __TIME__
 
-#define VQA_IDSTRING "VQA32 "VQA_VERSION" ("VQA_DATE")"
+#define VQA_IDSTRING "VQA32 " VQA_VERSION " (" VQA_DATE ")"
 #define VQA_REQUIRES "VQM32 2.12 or better."
 
 /* Block dimensions macro and identifiers. */

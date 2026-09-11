@@ -68,6 +68,20 @@ TURRET TXTLABEL UDATA UNIT VECTOR VISUDLG UTRACKER PACKET FIELD STATS CCDDE DDE"
 # for the game's .ASM files.
 GAME_ADDED = ["RAWFILE", "MONOC", "MISCASM", "KEYFBUFF", "TXTPRNT", "WINASM"]
 
+# The movie player: the parts of Red Alert's WINVQ library (src/vqa) that
+# C&C's configuration uses, and C++ replacements for the VQA32/VQM32
+# assembly they call. Captions, the DOS stream handler, mono display and the
+# VQM32 video/file code are not needed.
+VQA_SOURCES = [
+    "src/vqa/VQA32/AUDIO.CPP",
+    "src/vqa/VQA32/CONFIG.CPP",
+    "src/vqa/VQA32/DRAWER.CPP",
+    "src/vqa/VQA32/LOADER.CPP",
+    "src/vqa/VQA32/TASK.CPP",
+    "src/vqa/VQA32/UNVQBUFF.CPP",	# UNVQBUFF.ASM
+    "src/vqa/VQM32/VQMASM.CPP",	# VB.ASM, TESTVB.CPP, MCGABUF.ASM, SOSCODEC.ASM, AUDUNZAP.ASM
+]
+
 # Every engine source is compiled (the Remastered project's list, plus the
 # C++ ports of its assembly that live alongside).
 
@@ -98,6 +112,8 @@ def _sources(group="all"):
         out += [p for p in (ROOT / "src/game" / (s + ".CPP") for s in GAME_ADDED) if p.exists()]
     if group in ("wwlib", "all"):
         out += sorted(p for p in (ROOT / "src/wwlib").iterdir() if p.suffix in (".CPP", ".cpp"))
+    if group in ("vqa", "all"):
+        out += [ROOT / p for p in VQA_SOURCES]
     if group in ("platform", "all"):
         out += sorted((ROOT / "src/platform").glob("*.cpp"))
         out += sorted((ROOT / "src/platform").glob("*.c"))		# third-party C (blast.c)

@@ -87,7 +87,8 @@ def stage_data(stage):
     if not pkg.exists():
         print("warning: data/pkg missing; the game will find no data files")
         return
-    ini = ROOT / "web" / "CONQUER.INI"	# stands in for the one SETUP.EXE wrote
+    # stands in for the one SETUP.EXE wrote; $WEBCANDC_INI substitutes another (tests)
+    ini = Path(os.environ["WEBCANDC_INI"]) if os.environ.get("WEBCANDC_INI") else ROOT / "web" / "CONQUER.INI"
     if ini.exists():
         shutil.copy2(ini, stage / "CONQUER.INI")
     # data/cd (files extracted from the freeware C&C95 disc images) wins over

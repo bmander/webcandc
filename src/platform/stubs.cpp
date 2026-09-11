@@ -68,3 +68,11 @@ WORD Hard_Error_Occured = 0;		// Set by the DOS critical-error handler.
 int DLLForceMouseX = -1;			// Remastered DLL override of the mouse position; unused.
 int DLLForceMouseY = -1;
 char *__nheapbeg = NULL;			// Watcom near-heap start, walked by a debug heap dump.
+
+/*
+** ---- Win95 paging hint (wwlib MEMFLAG.H) ----------------------------------------
+** Force_VM_Page_In touched every page of a buffer so Windows wouldn't page it
+** out from under a timer callback (the VQA player calls it on its buffers).
+** Nothing is paged here.
+*/
+extern "C" void __cdecl Force_VM_Page_In(void *, int) {}

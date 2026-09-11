@@ -606,6 +606,7 @@ extern "C" HANDLE WINAPI GetCurrentProcess(void) { return (HANDLE)1; }
 extern "C" HANDLE WINAPI GetCurrentThread(void) { return (HANDLE)1; }
 extern "C" DWORD WINAPI GetCurrentThreadId(void) { return 1; }
 extern "C" BOOL WINAPI SetPriorityClass(HANDLE, DWORD) { return TRUE; }
+extern "C" DWORD WINAPI GetPriorityClass(HANDLE) { return 0x00000020; }	// NORMAL_PRIORITY_CLASS
 extern "C" BOOL WINAPI SetThreadPriority(HANDLE, int) { return TRUE; }
 
 /*
