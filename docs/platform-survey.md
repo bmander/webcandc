@@ -22,6 +22,8 @@ Palette: Set_Palette (PALETTE.CPP:86) → Set_DD_Palette (DDRAW.CPP:719) convert
 Present: game draws to HidPage then `HidPage.Blit(SeenBuff)` (~30 sites). Blit inline (GBUFFER.H:765) → DD_Linear_Blit_To_Linear when both are DD surfaces else software Linear_Blit_To_Linear. Some UI draws straight to SeenBuff (primary). Present when the primary is unlocked/blitted-to or at yield points.
 
 ## 3. Audio
+**Done (2026-09-11):** SOUNDIO/SOUNDINT/SOUNDLCK taken from Red Alert's library into src/wwlib, with AUDUNCMP.CPP and SOSCODEC.CPP ported from the assembly; DirectSound is src/platform/dsound.cpp on SDL audio (22050 Hz stereo mix). The survey below is the pre-port picture.
+
 Game expects WWLIB SOUNDIO API (wwlib/AUDIO.H:119-149); **none implemented in src/wwlib** (no SOUNDIO/SOUNDINT/SOUNDLCK/AUDUNCMP/SOSCODEC).
 Used: Play_Sample (44), Is_Sample_Playing, Stop_Sample, Sample_Status, Fade_Sample, File_Stream_Sample_Vol (THEME.CPP:321,329), Sound_Callback, Load_Sample/Free_Sample (ENDING), Audio_Init(MainWindow,16,false,22050,0) (STARTUP), Sound_End, Set_Score_Vol, Get_Digi_Handle, Set_Primary_Buffer_Format, Start_/Stop_Primary_Sound_Buffer (WINSTUB), Stop_Sample_Playing, Suspend_/Resume_Audio_Thread (CONQUER.CPP:2305), Audio_Focus_Loss_Function.
 Conflict: wwlib/FUNCTION.H:34 declares stale DOS `Audio_Init(int,int,int,int)`.
