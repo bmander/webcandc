@@ -1,0 +1,69 @@
+{
+ "source": "https://github.com/bmander/webcandc",
+ "files": [
+  {
+   "name": "AUD.MIX",
+   "size": 1890646
+  },
+  {
+   "name": "CCLOCAL.MIX",
+   "size": 121305
+  },
+  {
+   "name": "CONQUER.MIX",
+   "size": 2039435
+  },
+  {
+   "name": "DESEICNH.MIX",
+   "size": 120296
+  },
+  {
+   "name": "DESERT.MIX",
+   "size": 677061
+  },
+  {
+   "name": "GENERAL.MIX",
+   "size": 2584388
+  },
+  {
+   "name": "SCORES.MIX",
+   "size": 39114329
+  },
+  {
+   "name": "SOUNDS.MIX",
+   "size": 1228794
+  },
+  {
+   "name": "SPEECH.MIX",
+   "size": 594297
+  },
+  {
+   "name": "TEMPERAT.MIX",
+   "size": 639607
+  },
+  {
+   "name": "TEMPICNH.MIX",
+   "size": 119935
+  },
+  {
+   "name": "TRANSIT.MIX",
+   "size": 4105646
+  },
+  {
+   "name": "UPDATE.MIX",
+   "size": 10233756
+  },
+  {
+   "name": "UPDATEC.MIX",
+   "size": 990901
+  },
+  {
+   "name": "WINTER.MIX",
+   "size": 667385
+  },
+  {
+   "name": "WINTICNH.MIX",
+   "size": 119935
+  }
+ ]
+}

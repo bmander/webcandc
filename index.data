@@ -1,0 +1,29 @@
+; webcandc: stands in for the CONQUER.INI that the 1995 SETUP.EXE installed
+; (same sections and defaults). STARTUP.CPP refuses to run without it.
+[Sound]
+BitsPerSample=16
+Channels=0
+Reverse=0
+Speed=0
+Subtitles=0
+
+[Language]
+Language=ENG
+
+[Intro]
+PlayIntro=Yes
+
+[Options]
+IsScoreShuffle=0
+Resolution=0
+HardwareFills=0
+VideoBackBuffer=1
+Compatibility=0
+Socket=
+DestNet=
+
+[SerialDefaults]
+IRQ=4
+Baud=38400
+DialMethod=T
+Init=0
