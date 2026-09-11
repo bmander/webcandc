@@ -2246,6 +2246,9 @@ unsigned long VQA_GetTime(VQAHandleP *vqap)
 	}
 	#endif
 
+	#ifdef WEBCANDC
+	WebCandC_Clock_Read(WEBCANDC_CLOCK_VQA, ticks);	// webcandc: lets the movie loop sleep between frames
+	#endif
 	return (ticks);
 }
 

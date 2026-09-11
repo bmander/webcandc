@@ -26,7 +26,7 @@ Things learned along the way (beyond the original risk list):
 Known issues:
 - Nod-campaign movies live on the Nod disc (a second MOVIES.MIX); only the GDI disc is supported so far.
 - Multiplayer is off (IPX/Winsock/DDE report no network).
-- The 1995 loops poll the timers between frames, so the game keeps one CPU core busy (headless: 54 s CPU in 60 s). The page stays responsive; idling with a real sleep in the timer shims would save battery.
+- Fixed: the 1995 wait loops spin on the clock. The engine tick getters and the movie clock now report each read to the platform, which sleeps until the next timer once a clock returns the same value 64 times running; `Call_Back_Delay` (score, map and side-selection screens) sleeps once per pass. Headless CPU per 60 s: mission 54 s → 6 s, side-selection screen 42 s → 7 s.
 
 **Approach B:** start from EA's original GPL release of Tiberian Dawn and keep it as the base.
 Where Vanilla Conquer (VC) has already solved a problem (assembly rewrites, SDL backends,

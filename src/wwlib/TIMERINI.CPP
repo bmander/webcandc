@@ -295,6 +295,7 @@ unsigned WinTimerClass::Get_System_Tick_Count ( void )
 	** browser have a frame. Every 1995 wait loop reads the clock.
 	*/
 	WebCandC_Service();
+	WebCandC_Clock_Read(WEBCANDC_CLOCK_SYSTEM, SysTicks);	// webcandc: lets a spinning wait sleep
 #endif
 	return ( SysTicks );
 }
@@ -323,6 +324,7 @@ unsigned WinTimerClass::Get_User_Tick_Count ( void )
 	** browser have a frame. Every 1995 wait loop reads the clock.
 	*/
 	WebCandC_Service();
+	WebCandC_Clock_Read(WEBCANDC_CLOCK_USER, UserTicks);	// webcandc: lets a spinning wait sleep
 #endif
 	return ( UserTicks );
 }

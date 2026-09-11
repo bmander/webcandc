@@ -732,6 +732,10 @@ extern "C" {
 void WebCandC_Init(void);
 void WebCandC_Service(void);
 void WebCandC_Yield(void);
+/* A wait loop read a clock and got `value`; repeated values let the platform sleep. */
+enum { WEBCANDC_CLOCK_SYSTEM, WEBCANDC_CLOCK_USER, WEBCANDC_CLOCK_VQA, WEBCANDC_CLOCK_COUNT };
+void WebCandC_Clock_Read(int clock, unsigned value);
+void WebCandC_Idle(void);	/* sleep until the next timer is due (not inside a timer callback) */
 void WebCandC_Present(void);
 void WebCandC_Mark_Screen_Dirty(void);
 #ifdef __cplusplus

@@ -875,3 +875,50 @@ extern "C" void WebCandC_Yield(void)
 	Fire_Timers();
 	ServiceDepth--;
 }
+
+/*
+** ---- Idling -------------------------------------------------------------------
+** The 1995 code waits by spinning: it reads a clock until the value changes.
+** On Windows that burned a CPU as well; in a browser tab it keeps a core busy
+** for as long as the game is open. A clock only moves when a timer fires, so
+** many reads in a row that return the same value mean the game is waiting:
+** sleep until the next timer is due. A frame's logic reads the clock too, but
+** seldom this often within one tick, and a sleep there costs at most one tick
+** of a frame that would otherwise wait for its frame timer.
+*/
+#define IDLE_READS 64
+static struct { unsigned Value; int Reads; } Clocks[WEBCANDC_CLOCK_COUNT];
+
+/*
+** Sleep until the next timer is due: for loops that exist only to wait but do
+** too much work per pass to trip the repeated-read test below.
+*/
+extern "C" void WebCandC_Idle(void)
+{
+	double now = Now_Ms();
+	double due = now + 16.0;
+	for (size_t i = 0; i < Timers.size(); i++) {
+		if (Timers[i].Due < due) due = Timers[i].Due;
+	}
+	if (ServiceDepth || due - now < 1.0) return;
+	WebCandC_Present();
+	LastYield = Now_Ms();
+	emscripten_sleep((unsigned)(due - now));
+	ServiceDepth++;
+	Pump_SDL();
+	Fire_Timers();
+	ServiceDepth--;
+}
+
+extern "C" void WebCandC_Clock_Read(int clock, unsigned value)
+{
+	if (clock < 0 || clock >= WEBCANDC_CLOCK_COUNT) return;
+	if (value != Clocks[clock].Value) {
+		Clocks[clock].Value = value;
+		Clocks[clock].Reads = 0;
+		return;
+	}
+	if (++Clocks[clock].Reads < IDLE_READS) return;
+	Clocks[clock].Reads = 0;
+	WebCandC_Idle();
+}

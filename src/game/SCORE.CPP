@@ -1856,6 +1856,9 @@ void Call_Back_Delay(int time)
 			HidPage.Blit(SeenBuff);
 			WWMouse->Erase_Mouse(&HidPage, TRUE);
 		//}
+#ifdef WEBCANDC
+		if (cd.Time()) WebCandC_Idle();	// webcandc: one pass per tick, not as many as the CPU allows
+#endif
 	} while(cd.Time());
 	StreamLowImpact = false;
 }
