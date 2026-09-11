@@ -3206,7 +3206,8 @@ TechnoTypeClass const * HouseClass::Suggest_New_Object(RTTIType objecttype) cons
 				**	Build a list of the maximum of each type we wish to produce. This will be
 				**	twice the number required to fill all teams.
 				*/
-				for (int index = 0; index < Teams.Count(); index++) {
+				int index;
+				for (index = 0; index < Teams.Count(); index++) {
 					TeamClass * tptr = Teams.Ptr(index);
 					if (tptr) {
 						TeamTypeClass const * team = tptr->Class;
@@ -3302,7 +3303,8 @@ TechnoTypeClass const * HouseClass::Suggest_New_Object(RTTIType objecttype) cons
 				**	Build a list of the maximum of each type we wish to produce. This will be
 				**	twice the number required to fill all teams.
 				*/
-				for (int index = 0; index < Teams.Count(); index++) {
+				int index;
+				for (index = 0; index < Teams.Count(); index++) {
 					TeamClass * tptr = Teams.Ptr(index);
 					if (tptr) {
 						TeamTypeClass const * team = tptr->Class;

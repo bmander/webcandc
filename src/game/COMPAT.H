@@ -49,6 +49,7 @@
 #define	BuffType		BufferClass
 #define movmem(a,b,c) memmove(b,a,c)
 #define ShapeBufferSize	_ShapeBufferSize
+#define ShapeBuffer		_ShapeBuffer		// webcandc: the engine's staging buffer (wwlib/SETSHAPE.CPP), as above
 extern "C" {
 	extern	long ShapeBufferSize;
 	extern	char *ShapeBuffer;

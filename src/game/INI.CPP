@@ -283,7 +283,8 @@ bool Read_Scenario_Ini(char *root, bool fresh)
 	*/
 	ScenarioCRC = 0;
 	len = strlen(buffer);
-	for (int i = 0; i < len; i++) {
+	int i;
+	for (i = 0; i < len; i++) {
 		val = (unsigned char)buffer[i];
 #ifndef DEMO
 		Add_CRC(&ScenarioCRC, (unsigned long)val);

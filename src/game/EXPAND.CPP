@@ -116,7 +116,8 @@ bool Expansion_Dialog(void)
 	**	Add in all the expansion scenarios.
 	*/
 	char * sbuffer = (char*)_ShapeBuffer;
-	for (int index = 20; index < 60; index++) {
+	int index;
+	for (index = 20; index < 60; index++) {
 		char buffer[128];
 		CCFileClass file;
 
@@ -308,7 +309,8 @@ bool Bonus_Dialog(void)
 	};
 
 
-	for (int index = 60; index < 63; index++) {
+	int index;
+	for (index = 60; index < 63; index++) {
 		char buffer[128];
 		CCFileClass file;
 

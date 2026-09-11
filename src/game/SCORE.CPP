@@ -646,7 +646,8 @@ void ScoreClass::Presentation(void)
 	**	Determine leadership rating.
 	*/
 	unsigned leadership = 0;
-	for (int index = 0; index < Logic.Count(); index++) {
+	int index;
+	for (index = 0; index < Logic.Count(); index++) {
 		ObjectClass * object = Logic[index];
 		if (object->Owner() == house) {
 			leadership++;
@@ -1092,7 +1093,8 @@ void ScoreClass::Do_Nod_Buildings_Graph(void)
 	/*
 	** Here's the animation/draw loop for blowing up the factory
 	*/
-	for (int i=0; i<98; i++) {
+	int i;
+	for (i=0; i<98; i++) {
 		SysMemPage.Blit(SysMemPage, BUILDING_X, BUILDING_Y, 0, 0, 320-BUILDING_X,48);
 		shapenum = 0;	// no damage
 		if (i >= 60) {

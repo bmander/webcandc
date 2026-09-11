@@ -547,7 +547,7 @@ FireErrorType UnitClass::Can_Fire(TARGET target, int which) const
 				nonconst = (UnitClass *)this;
 				nonconst->Set_Rate(Options.Normalize_Delay(2));
 				nonconst->Set_Stage(0);
-				IsFiring = true;
+				nonconst->IsFiring = true;		// webcandc: was a write through const this; route via the existing nonconst alias
 				cf = FIRE_BUSY;
 			} else {
 				if (Fetch_Stage() < 4) cf = FIRE_BUSY;

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Command &amp; Conquer — WebAssembly</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #9aa88f; font: 14px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  #frame { position: relative; width: min(100vw, 160vh); aspect-ratio: 8 / 5; }
+  canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; outline: none; cursor: none; background: #000; }
+  #status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+  #status[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="frame">
+  <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+  <div id="status">Loading…</div>
+</div>
+<script>
+  var statusEl = document.getElementById('status');
+  var canvasEl = document.getElementById('canvas');
+  var Module = {
+    canvas: canvasEl,
+    print: function (t) { console.log(t); },
+    printErr: function (t) { console.warn(t); },
+    setStatus: function (t) {
+      statusEl.textContent = t;
+      statusEl.hidden = !t;
+    },
+    monitorRunDependencies: function (left) {
+      if (!left) Module.setStatus('');
+    }
+  };
+  canvasEl.addEventListener('mousedown', function () { canvasEl.focus(); });
+  window.addEventListener('keydown', function (e) {
+    if (['Tab', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', ' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace'].indexOf(e.key) >= 0) e.preventDefault();
+  });
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

@@ -33,6 +33,282 @@
 
 #include "gbuffer.h"
 #include "MISC.H"
+#include "wsa.h"		// webcandc: extern "C" prototypes for Apply_XOR_Delta*
+#include "palette.h"	// webcandc: extern "C" prototype for Set_Palette_Range
+
+/*
+** webcandc: shared helpers for the portable C++ ports of the original x86
+** routines in this file.  Pointers, int and long are all 32 bits on wasm32;
+** the 32-bit wrap-around arithmetic of the asm is reproduced with unsigned
+** arithmetic where it matters.
+*/
+#include <string.h>
+#include <stdint.h>
+
+namespace {
+
+/*
+** Read access to the protected members of a GraphicViewPortClass (the asm
+** read them directly with [reg]GraphicViewPortClass.Member).
+*/
+struct WW_GVP_Access : public GraphicViewPortClass {
+	static long Offset_Of(void const *vp) {return static_cast<GraphicViewPortClass const *>(vp)->*(&WW_GVP_Access::Offset);}
+	static int  Width_Of(void const *vp)  {return static_cast<GraphicViewPortClass const *>(vp)->*(&WW_GVP_Access::Width);}
+	static int  Height_Of(void const *vp) {return static_cast<GraphicViewPortClass const *>(vp)->*(&WW_GVP_Access::Height);}
+	static int  XAdd_Of(void const *vp)   {return static_cast<GraphicViewPortClass const *>(vp)->*(&WW_GVP_Access::XAdd);}
+	static int  Pitch_Of(void const *vp)  {return (int)(static_cast<GraphicViewPortClass const *>(vp)->*(&WW_GVP_Access::Pitch));}
+};
+
+inline int WW_Add(int a, int b) {return (int)((unsigned)a + (unsigned)b);}
+inline int WW_Sub(int a, int b) {return (int)((unsigned)a - (unsigned)b);}
+inline int WW_Mul(int a, int b) {return (int)((unsigned)a * (unsigned)b);}
+inline int WW_Neg(int a)        {return (int)(0u - (unsigned)a);}
+
+inline unsigned char *GVP_Base(void const *vp) {return (unsigned char *)(intptr_t)WW_GVP_Access::Offset_Of(vp);}
+inline int GVP_Width(void const *vp)  {return WW_GVP_Access::Width_Of(vp);}
+inline int GVP_Height(void const *vp) {return WW_GVP_Access::Height_Of(vp);}
+
+/* XAdd + Pitch: bytes from the end of one row to the start of the next. */
+inline int GVP_Modulo(void const *vp) {return WW_Add(WW_GVP_Access::XAdd_Of(vp), WW_GVP_Access::Pitch_Of(vp));}
+
+/* Width + XAdd + Pitch: bytes from one row to the next. */
+inline int GVP_Stride(void const *vp) {return WW_Add(GVP_Width(vp), GVP_Modulo(vp));}
+
+/*
+** Sutherland code exactly as built by the shld sequences of the asm:
+**   bit3 = x < 0, bit2 = x > width, bit1 = y < 0, bit0 = y > height
+** (bits 2 and 0 are the complemented sign bits of x-(width+1) and y-(height+1)).
+*/
+inline unsigned WW_Clip_Code(int x, int y, int width, int height)
+{
+	unsigned code = ((unsigned)x >> 31) << 3;
+	code |= ((((unsigned)x - (unsigned)width - 1u) >> 31) ^ 1u) << 2;
+	code |= ((unsigned)y >> 31) << 1;
+	code |= (((unsigned)y - (unsigned)height - 1u) >> 31) ^ 1u;
+	return code;
+}
+
+/* Same result as a forward "rep movsb", including overlapping regions. */
+inline void WW_Copy_Forward(unsigned char *dst, unsigned char const *src, int count)
+{
+	if (count <= 0) return;
+	uintptr_t d = (uintptr_t)dst;
+	uintptr_t s = (uintptr_t)src;
+	if (d <= s || d >= s + (unsigned)count) {
+		memmove(dst, src, (size_t)count);
+	} else {
+		while (count--) *dst++ = *src++;
+	}
+}
+
+/* Same result as a backward (std) "rep movsb" starting at the LAST byte of each region. */
+inline void WW_Copy_Backward(unsigned char *dst_last, unsigned char const *src_last, int count)
+{
+	if (count <= 0) return;
+	unsigned char *dst = dst_last - (count - 1);
+	unsigned char const *src = src_last - (count - 1);
+	uintptr_t d = (uintptr_t)dst;
+	uintptr_t s = (uintptr_t)src;
+	if (d >= s || d + (unsigned)count <= s) {
+		memmove(dst, src, (size_t)count);
+	} else {
+		while (count--) *dst_last-- = *src_last--;
+	}
+}
+
+/* imul/idiv pair: 32x32->64 signed multiply, 64/32 signed (truncating) divide. */
+inline int WW_Mul_Div(int a, int b, int c)
+{
+	if (c == 0) return 0;	// would raise #DE on x86; avoid a wasm trap
+	return (int)(uint32_t)(((int64_t)a * (int64_t)b) / (int64_t)c);
+}
+
+/*
+** Buffer_Draw_Line clipping helpers: "set_bits" and the "clip_tbl" jump
+** table (a_up / a_dwn / a_lft / a_rgt / nada) of the asm.
+*/
+struct WW_Line_Clip {
+	int MinX, MaxX, MinY, MaxY;
+
+	unsigned Bits(int x, int y) const
+	{
+		unsigned bits = 0;
+		if (y < MinY) bits |= 1;		// up
+		if (y > MaxY) bits |= 2;		// down
+		if (x < MinX) bits |= 4;		// left
+		if (x > MaxX) bits |= 8;		// right
+		return bits;
+	}
+
+	/* clip_vert: xa'=xa+[(miny-ya)(xb-xa)/(yb-ya)], ya'=miny */
+	static void Vert(int edge, int &xa, int &ya, int xb, int yb)
+	{
+		xa = WW_Add(xa, WW_Mul_Div(WW_Sub(xb, xa), WW_Sub(edge, ya), WW_Sub(yb, ya)));
+		ya = edge;
+	}
+
+	/* clip_horiz: ya'=ya+[(minx-xa)(yb-ya)/(xb-xa)], xa'=minx */
+	static void Horiz(int edge, int &xa, int &ya, int xb, int yb)
+	{
+		ya = WW_Add(ya, WW_Mul_Div(WW_Sub(edge, xa), WW_Sub(yb, ya), WW_Sub(xb, xa)));
+		xa = edge;
+	}
+
+	/* Returns true (carry set) if point a was moved. */
+	bool Clip(unsigned bits, int &xa, int &ya, int &xb, int &yb) const
+	{
+		switch (bits) {
+			case 1:
+			case 9:		// a_up
+				Vert(MinY, xa, ya, xb, yb);
+				return true;
+
+			case 2:
+			case 6:		// a_dwn
+				ya = WW_Neg(ya);
+				yb = WW_Neg(yb);
+				Vert(WW_Neg(MaxY), xa, ya, xb, yb);
+				ya = WW_Neg(ya);
+				yb = WW_Neg(yb);
+				return true;
+
+			case 4:
+			case 5:		// a_lft
+				Horiz(MinX, xa, ya, xb, yb);
+				return true;
+
+			case 8:
+			case 10:		// a_rgt
+				xa = WW_Neg(xa);
+				xb = WW_Neg(xb);
+				Horiz(WW_Neg(MaxX), xa, ya, xb, yb);
+				xa = WW_Neg(xa);
+				xb = WW_Neg(xb);
+				return true;
+
+			default:		// nada
+				return false;
+		}
+	}
+};
+
+/* Build_Fading_Table: "new = orig - ((orig-target) * fraction)" using the asm's imul dl / shl ax,1 / sub dh,ah. */
+inline unsigned char WW_Fade_Gun(unsigned char orig, unsigned char target, unsigned char fraction)
+{
+	int diff = (signed char)(unsigned char)(orig - target);				// al = (orig-target)
+	unsigned ax = (unsigned)(diff * (int)(signed char)fraction) & 0xFFFFu;	// imul dl
+	ax = (ax << 1) & 0xFFFFu;													// shl ax,1
+	return (unsigned char)(orig - (ax >> 8));									// sub dh,ah
+}
+
+/* Build_Fading_Table: squared difference of one gun (8-bit signed difference, imul ah). */
+inline unsigned WW_Gun_Distance(unsigned char gun, unsigned char ideal)
+{
+	int diff = (signed char)(unsigned char)(gun - ideal);
+	return (unsigned)(diff * diff);
+}
+
+/*
+** XOR_Delta_Buffer / Copy_Delta_Buffer: the asm received the target (edi),
+** delta (esi) and width (ebx) in registers set up by
+** Apply_XOR_Delta_To_Page_Or_Viewport; the C++ ports pass them through here.
+*/
+unsigned char *XORDelta_Target = 0;
+unsigned char const *XORDelta_Source = 0;
+unsigned int XORDelta_Width = 0;
+
+void WW_Delta_To_Page(int nextrow, bool do_xor)
+{
+	unsigned char *dst = XORDelta_Target;			// edi
+	unsigned char const *src = XORDelta_Source;	// esi
+	unsigned int width = XORDelta_Width;			// ebx: max column
+	unsigned int col = 0;							// edx: relative column
+	unsigned int code;
+	unsigned int count;
+	bool run;
+
+	for (;;) {
+		code = *src++;					// get delta source byte
+
+		if (code == 0) {
+			// SHORTRUN
+			count = *src++;
+			run = true;
+		} else if ((code & 0x80) == 0) {
+			// SHORTDUMP
+			count = code;
+			run = false;
+		} else {
+			// By now, we know it must be a LONGDUMP, SHORTSKIP, LONGRUN, or LONGSKIP
+			code -= 0x80;
+			if (code == 0) {
+				code = src[0] | (src[1] << 8);	// get word code
+				src += 2;
+				if (code == 0) break;			// long count of zero means stop
+				if (code & 0x8000) {
+					code -= 0x8000;
+					if (code & 0x4000) {
+						// LONGRUN
+						count = code - 0x4000;
+						run = true;
+					} else {
+						// LONGDUMP
+						count = code;
+						run = false;
+					}
+					code = 0;
+				}
+			}
+			if (code != 0) {
+				// SHORTSKIP AND LONGSKIP
+				dst -= col;						// go back to beginning or row.
+				col += code;					// incriment our count on current row
+				while (col >= width) {			// are we past the end of the row
+					col -= width;
+					dst += nextrow;				// jump to start of next row
+				}
+				dst += col;						// get to correct position in row.
+				continue;
+			}
+		}
+
+		if (run) {
+			unsigned char value = *src++;		// get XOR byte
+			for (; count; count--) {
+				if (do_xor) {
+					*dst ^= value;
+				} else {
+					*dst = value;
+				}
+				col++;
+				dst++;
+				if (col == width) {				// are we at the final column
+					dst -= width;
+					col = 0;
+					dst += nextrow;
+				}
+			}
+		} else {
+			for (; count; count--) {
+				if (do_xor) {
+					*dst ^= *src;
+				} else {
+					*dst = *src;
+				}
+				src++;
+				col++;
+				dst++;
+				if (col == width) {
+					dst -= col;
+					col = 0;
+					dst += nextrow;
+				}
+			}
+		}
+	}
+}
+
+}
 
 IconCacheClass::IconCacheClass (void)
 {
@@ -110,452 +386,125 @@ extern "C" void __cdecl Set_Font_Palette_Range(void const *palette, INT start_id
 
 void __cdecl Buffer_Draw_Line(void *this_object, int sx, int sy, int dx, int dy, unsigned char color)
 {
-	unsigned int clip_min_x;
-	unsigned int clip_max_x;
-	unsigned int clip_min_y;
-	unsigned int clip_max_y;
-	unsigned int clip_var;
-	unsigned int accum;
-	unsigned int bpr;
-	
-	static int _one_time_init = 0;
+	// webcandc: C++ port of the original x86 routine
+	WW_Line_Clip clip;
+	clip.MinX = 0;
+	clip.MinY = 0;
+	clip.MaxX = GVP_Width(this_object) - 1;		// max pixels are tested inclusively
+	clip.MaxY = GVP_Height(this_object) - 1;
+	int bpr = GVP_Stride(this_object);
 
-	//clip_tbl	DD	nada,a_up,a_dwn,nada
-	//		DD	a_lft,a_lft,a_dwn,nada
-	//		DD	a_rgt,a_up,a_rgt,nada
-	//		DD	nada,nada,nada,nada
+	/*
+	** The asm kept the end points in (eax,ebx) and (ecx,edx) and swapped them
+	** while clipping; the names below follow the registers so the point that
+	** ends up as the start of the line is the same as in the original.
+	*/
+	int x0 = sx;		// eax
+	int y0 = sy;		// ebx
+	int x1 = dx;		// ecx
+	int y1 = dy;		// edx
+	int tmp;
 
-	static void *_clip_table [4*4] = {0};
+	//;*==================================================================
+	//;* This is the section that "pushes" the line into bounds.
+	//;*==================================================================
+	if (x0 < clip.MinX || x0 > clip.MaxX || y0 < clip.MinY || y0 > clip.MaxY ||
+		 x1 < clip.MinX || x1 > clip.MaxX || y1 < clip.MinY || y1 > clip.MaxY) {
+		for (;;) {
+			// clip_it:
+			unsigned bits_prev = clip.Bits(x0, y0);		// edi
+			tmp = x0; x0 = x1; x1 = tmp;
+			tmp = y0; y0 = y1; y1 = tmp;
+			unsigned bits = clip.Bits(x0, y0);			// esi
+			if ((bits_prev | bits) == 0) break;			// on_screen
+			if (bits_prev & bits) return;					// off_screen
+			if (clip.Clip(bits, x0, y0, x1, y1)) continue;
+			tmp = x0; x0 = x1; x1 = tmp;
+			tmp = y0; y0 = y1; y1 = tmp;
+			clip.Clip(bits_prev, x0, y0, x1, y1);
+		}
+	}
 
-	unsigned int int_color = color;
-	unsigned int x1_pixel = (unsigned int) sx;
-	unsigned int y1_pixel = (unsigned int) sy;
-	unsigned int x2_pixel = (unsigned int) dx;
-	unsigned int y2_pixel = (unsigned int) dy;
+	//;*==================================================================
+	//;* Draw the line to the screen.
+	//;*==================================================================
+	unsigned char *base = GVP_Base(this_object);
+	unsigned char *line;
+	int count;
 
-	__asm {		  
-		mov	eax,_one_time_init
-		and	eax,eax
-		jnz	init_done
-
-		call	do_init
-
-init_done:
-		
-		//;*==================================================================
-		//;* Take care of find the clip minimum and maximums
-		//;*==================================================================
-		mov	ebx,[this_object]
-		xor	eax,eax
-		mov	[clip_min_x],eax
-		mov	[clip_min_y],eax
-		mov	eax,[ebx]GraphicViewPortClass.Width
-		mov	[clip_max_x],eax
-		add	eax,[ebx]GraphicViewPortClass.XAdd
-		add	eax,[ebx]GraphicViewPortClass.Pitch
-		mov	[bpr],eax
-		mov	eax,[ebx]GraphicViewPortClass.Height
-		mov	[clip_max_y],eax
-
-		//;*==================================================================
-		//;* Adjust max pixels as they are tested inclusively.
-		//;*==================================================================
-		dec	[clip_max_x]
-		dec	[clip_max_y]
-
-		//;*==================================================================
-		//;* Set the registers with the data for drawing the line
-		//;*==================================================================
-		mov	eax,[x1_pixel]		//; eax = start x pixel position
-		mov	ebx,[y1_pixel]		//; ebx = start y pixel position
-		mov	ecx,[x2_pixel]		//; ecx = dest x pixel position
-		mov	edx,[y2_pixel]		//; edx = dest y pixel position
-
-		//;*==================================================================
-		//;* This is the section that "pushes" the line into bounds.
-		//;* I have marked the section with PORTABLE start and end to signify
-		//;* how much of this routine is 100% portable between graphics modes.
-		//;* It was just as easy to have variables as it would be for constants
-		//;* so the global vars ClipMaxX,ClipMinY,ClipMaxX,ClipMinY are used
-		//;* to clip the line (default is the screen)
-		//;* PORTABLE start
-		//;*==================================================================
-
-		cmp	eax,[clip_min_x]
-		jl	short clip_it
-		cmp	eax,[clip_max_x]
-		jg	short clip_it
-		cmp	ebx,[clip_min_y]
-		jl	short clip_it
-		cmp	ebx,[clip_max_y]
-		jg	short clip_it
-		cmp	ecx,[clip_min_x]
-		jl	short clip_it
-		cmp	ecx,[clip_max_x]
-		jg	short clip_it
-		cmp	edx,[clip_min_y]
-		jl	short clip_it
-		cmp	edx,[clip_max_y]
-		jle	short on_screen
-
-		//;*==================================================================
-		//;* Takes care off clipping the line.
-		//;*==================================================================
-	clip_it:
-		call	set_bits
-		xchg	eax,ecx
-		xchg	ebx,edx
-		mov	edi,esi
-		call	set_bits
-		mov	[clip_var],edi
-		or	[clip_var],esi
-		jz	short on_screen
-		test	edi,esi
-		jne	short off_screen
-		shl	esi,2
-		//call	[clip_tbl+esi]
-		call	[_clip_table+esi]
-		jc	clip_it
-		xchg	eax,ecx
-		xchg	ebx,edx
-		shl	edi,2
-		//call	[clip_tbl+edi]
-		call	[_clip_table+edi]
-		jmp	clip_it
-
-	on_screen:
-		jmp	draw_it
-
-	off_screen:
-		jmp	and_out
-
-		//;*==================================================================
-		//;* Jump table for clipping conditions
-		//;*==================================================================
-	//clip_tbl	DD	nada,a_up,a_dwn,nada
-	//		DD	a_lft,a_lft,a_dwn,nada
-	//		DD	a_rgt,a_up,a_rgt,nada
-	//		DD	nada,nada,nada,nada
-
-	nada:
-		clc
-		ret
-
-	a_up:
-		mov	esi,[clip_min_y]
-		call	clip_vert
-		stc
-		ret
-
-	a_dwn:
-		mov	esi,[clip_max_y]
-		neg	esi
-		neg	ebx
-		neg	edx
-		call	clip_vert
-		neg	ebx
-		neg	edx
-		stc
-		ret
-
-		//;*==================================================================
-		//;* xa'=xa+[(miny-ya)(xb-xa)/(yb-ya)]
-		//;*==================================================================
-	clip_vert:
-		push	edx
-		push	eax
-		mov	[clip_var],edx		//; clip_var = yb
-		sub	[clip_var],ebx		//; clip_var = (yb-ya)
-		neg	eax			//; eax=-xa
-		add	eax,ecx			//; (ebx-xa)
-		mov	edx,esi			//; edx=miny
-		sub	edx,ebx			//; edx=(miny-ya)
-		imul	edx
-		idiv	[clip_var]
-		pop	edx
-		add	eax,edx
-		pop	edx
-		mov	ebx,esi
-		ret
-
-	a_lft:
-		mov	esi,[clip_min_x]
-		call	clip_horiz
-		stc
-		ret
-
-	a_rgt:
-		mov	esi,[clip_max_x]
-		neg	eax
-		neg	ecx
-		neg	esi
-		call	clip_horiz
-		neg	eax
-		neg	ecx
-		stc
-		ret
-
-		//;*==================================================================
-		//;* ya'=ya+[(minx-xa)(yb-ya)/(xb-xa)]
-		//;*==================================================================
-	clip_horiz:
-		push	edx
-		mov	[clip_var],ecx		//; clip_var = xb
-		sub	[clip_var],eax		//; clip_var = (xb-xa)
-		sub	edx,ebx			//; edx = (yb-ya)
-		neg	eax			//; eax = -xa
-		add	eax,esi			//; eax = (minx-xa)
-		imul	edx			//; eax = (minx-xa)(yb-ya)
-		idiv	[clip_var]		//; eax = (minx-xa)(yb-ya)/(xb-xa)
-		add	ebx,eax			//; ebx = xa+[(minx-xa)(yb-ya)/(xb-xa)]
-		pop	edx
-		mov	eax,esi
-		ret
-
-		//;*==================================================================
-		//;* Sets the condition bits
-		//;*==================================================================
-	set_bits:
-		xor	esi,esi
-		cmp	ebx,[clip_min_y]	//; if y >= top its not up
-		jge	short a_not_up
-		or	esi,1
-
-	a_not_up:
-		cmp	ebx,[clip_max_y]	//; if y <= bottom its not down
-		jle	short a_not_down
-		or	esi,2
-
-	a_not_down:
-		cmp	eax,[clip_min_x]   	//; if x >= left its not left
-		jge	short a_not_left
-		or	esi,4
-
-	a_not_left:
-		cmp	eax,[clip_max_x]	//; if x <= right its not right
-		jle	short a_not_right
-		or	esi,8
-
-	a_not_right:
-		ret
-
-		//;*==================================================================
-		//;* Draw the line to the screen.
-		//;* PORTABLE end
-		//;*==================================================================
-	draw_it:
-		sub	edx,ebx			//; see if line is being draw down
-		jnz	short not_hline	//; if not then its not a hline
-		jmp	short hline		//; do special case h line
-
-	not_hline:
-		jg	short down		//; if so there is no need to rev it
-		neg	edx			//; negate for actual pixel length
-		xchg	eax,ecx			//; swap x's to rev line draw
-		sub	ebx,edx			//; get old edx
-
-	down:
-		push	edx
-		push	eax
-		mov	eax,[bpr]
-		mul	ebx
-		mov	ebx,eax
-		mov	eax,[this_object]
-		add	ebx,[eax]GraphicViewPortClass.Offset
-		pop	eax
-		pop	edx
-
-		mov	esi,1			//; assume a right mover
-		sub	ecx,eax			//; see if line is right
-		jnz	short not_vline	//; see if its a vertical line
-		jmp	vline
-
-	not_vline:
-		jg	short right		//; if so, the difference = length
-
-	//left:
-		neg	ecx			//; else negate for actual pixel length
-		neg	esi			//; negate counter to move left
-
-	right:
-		cmp	ecx,edx			//; is it a horiz or vert line
-		jge	short horiz		//; if ecx > edx then |x|>|y| or horiz
-
-	//vert:
-		xchg	ecx,edx			//; make ecx greater and edx lesser
-		mov	edi,ecx			//; set greater
-		mov	[accum],ecx		//; set accumulator to 1/2 greater
-		shr	[accum],1
-
-		//;*==================================================================
-		//;* at this point ...
-		//;* eax=xpos ; ebx=page line offset; ecx=counter; edx=lesser; edi=greater;
-		//;* esi=adder; accum=accumulator
-		//;* in a vertical loop the adder is conditional and the inc constant
-		//;*==================================================================
-	//vert_loop:
-		add	ebx,eax
-		mov	eax,[int_color]
-
-	v_midloop:
-		mov	[ebx],al
-		dec	ecx
-		jl	and_out
-		add	ebx,[bpr]
-		sub	[accum],edx		//; sub the lesser
-		jge	v_midloop		//; any line could be new
-		add	[accum],edi		//; add greater for new accum
-		add	ebx,esi			//; next pixel over
-		jmp	v_midloop
-
-	horiz:
-		mov	edi,ecx			//; set greater
-		mov	[accum],ecx		//; set accumulator to 1/2 greater
-		shr	[accum],1
-
-		//;*==================================================================
-		//;* at this point ...
-		//;* eax=xpos ; ebx=page line offset; ecx=counter; edx=lesser; edi=greater;
-		//;* esi=adder; accum=accumulator
-		//;* in a vertical loop the adder is conditional and the inc constant
-		//;*==================================================================
-	//horiz_loop:
-		add	ebx,eax
-		mov	eax,[int_color]
-
-	h_midloop:
-		mov	[ebx],al
-		dec	ecx				//; dec counter
-		jl	and_out				//; end of line
-		add	ebx,esi
-		sub     [accum],edx			//; sub the lesser
-		jge	h_midloop
-		add	[accum],edi			//; add greater for new accum
-		add	ebx,[bpr]			//; goto next line
-		jmp	h_midloop
-
-		//;*==================================================================
+	if (y1 == y0) {
 		//;* Special case routine for horizontal line draws
-		//;*==================================================================
-	hline:
-		cmp	eax,ecx			//; make eax < ecx
-		jl	short hl_ac
-		xchg	eax,ecx
+		if (!(x0 < x1)) {
+			tmp = x0; x0 = x1; x1 = tmp;
+		}
+		count = WW_Add(WW_Sub(x1, x0), 1);
+		line = base + WW_Mul(bpr, y0) + x0;
+		if (count > 0) memset(line, color, (size_t)count);
+		return;
+	}
 
-	hl_ac:
-		sub	ecx,eax			//; get len
-		inc	ecx
+	int ddy = WW_Sub(y1, y0);
+	if (!(y1 > y0)) {				// not drawn down, so reverse the line
+		ddy = WW_Neg(ddy);
+		tmp = x0; x0 = x1; x1 = tmp;
+		y0 = WW_Sub(y0, ddy);
+	}
 
-		push	edx
-		push	eax
-		mov	eax,[bpr]
-		mul	ebx
-		mov	ebx,eax
-		mov	eax,[this_object]
-		add	ebx,[eax]GraphicViewPortClass.Offset
-		pop	eax
-		pop	edx
-		add	ebx,eax
-		mov	edi,ebx
-		cmp	ecx,15
-		jg	big_line
-		mov	al,[color]
-		rep	stosb			//; write as many words as possible
-		jmp	short and_out		//; get outt
-
-
-	big_line:
-		mov	al,[color]
-		mov	ah,al
-		mov     ebx,eax
-		shl	eax,16
-		mov	ax,bx
-		test	edi,3
-		jz	aligned
-		mov	[edi],al
-		inc	edi
-		dec	ecx
-		test	edi,3
-		jz	aligned
-		mov	[edi],al
-		inc	edi
-		dec	ecx
-		test	edi,3
-		jz	aligned
-		mov	[edi],al
-		inc	edi
-		dec	ecx
-
-	aligned:
-		mov	ebx,ecx
-		shr	ecx,2
-		rep	stosd
-		mov	ecx,ebx
-		and	ecx,3
-		rep	stosb
-		jmp	and_out
-
-
-		//;*==================================================================
+	line = base + WW_Mul(bpr, y0);
+	int adder = 1;					// assume a right mover
+	int ddx = WW_Sub(x1, x0);
+	if (ddx == 0) {
 		//;* a special case routine for vertical line draws
-		//;*==================================================================
-	vline:
-		mov	ecx,edx			//; get length of line to draw
-		inc	ecx
-		add	ebx,eax
-		mov	eax,[int_color]
+		count = WW_Add(ddy, 1);
+		line += x0;
+		do {
+			*line = color;
+			line += bpr;
+		} while (--count != 0);
+		return;
+	}
+	if (!(x1 > x0)) {
+		ddx = WW_Neg(ddx);			// negate for actual pixel length
+		adder = -1;					// negate counter to move left
+	}
+	line += x0;
 
-	vl_loop:
-		mov	[ebx],al		//; store bit
-		add	ebx,[bpr]
-		dec	ecx
-		jnz	vl_loop
-		jmp	and_out
-
-
-do_init:
-		mov	edi, offset _clip_table
-		
-		lea	esi, nada
-		mov	[edi], esi
-		mov	[edi+12], esi
-		lea	esi, a_up
-		mov	[edi+4], esi
-		lea	esi, a_dwn
-		mov	[edi+8], esi
-
-		add	edi, 16
-		
-		lea	esi, a_lft
-		mov	[edi], esi
-		mov	[edi+4], esi
-		lea	esi, a_dwn
-		mov	[edi+8], esi
-		lea	esi, nada
-		mov	[edi+12], esi
-
-		add	edi, 16
-
-		lea	esi, a_rgt
-		mov	[edi], esi
-		mov	[edi+8], esi
-		lea	esi, a_up
-		mov	[edi+4], esi
-		lea	esi, nada
-		mov	[edi+12], esi
-
-		add	edi, 16
-
-		lea	esi, nada
-		mov	[edi], esi
-		mov	[edi+4], esi
-		mov	[edi+8], esi
-		mov	[edi+12], esi
-		
-		mov	[_one_time_init], 1
-		ret
-
-	and_out:
+	int greater;
+	int lesser;
+	int accum;
+	int old;
+	if (ddx >= ddy) {
+		// horiz: ecx=counter; edx=lesser; edi=greater; esi=adder
+		greater = ddx;
+		lesser = ddy;
+		count = greater;
+		accum = (int)((unsigned)greater >> 1);
+		for (;;) {
+			*line = color;
+			if (--count < 0) break;		// end of line
+			line += adder;
+			old = accum;
+			accum = WW_Sub(accum, lesser);
+			if (old >= lesser) continue;
+			accum = WW_Add(accum, greater);
+			line += bpr;				// goto next line
+		}
+	} else {
+		// vert: the adder is conditional and the inc constant
+		greater = ddy;
+		lesser = ddx;
+		count = greater;
+		accum = (int)((unsigned)greater >> 1);
+		for (;;) {
+			*line = color;
+			if (--count < 0) break;
+			line += bpr;
+			old = accum;
+			accum = WW_Sub(accum, lesser);
+			if (old >= lesser) continue;
+			accum = WW_Add(accum, greater);
+			line += adder;				// next pixel over
+		}
 	}
 }
 
@@ -1087,202 +1036,75 @@ void __cdecl Buffer_Fill_Rect(void *thisptr, int sx, int sy, int dx, int dy, uns
 	LOCAL	VPbpr:DWORD		; the number of bytes per row of viewport
 */
 
-	int VPwidth;
-	int VPheight;
-	int VPxadd;
-	int VPbpr;
+	// webcandc: C++ port of the original x86 routine
+	int VPwidth = GVP_Width(this_object);
+	int VPheight = GVP_Height(this_object);
+	int VPxadd = GVP_Modulo(this_object);		// xadd + extra pitch of direct draw surface
+	int VPbpr = WW_Add(VPwidth, VPxadd);
 
-	int local_ebp;	                      // Can't use ebp
+	int x = x1_pixel;		// eax
+	int y = y1_pixel;		// ebx
+	int w = x2_pixel;		// ecx
+	int h = y2_pixel;		// edx
+	int t;
 
-	__asm {
-
-		;*===================================================================
-		;* save off the viewport characteristics on the stack
-		;*===================================================================
-		mov	ebx,[this_object]				; get a pointer to viewport
-		mov	eax,[ebx]GraphicViewPortClass.Width		; get width from viewport
-		mov	ecx,[ebx]GraphicViewPortClass.Height	; get height from viewport
-		mov	edx,[ebx]GraphicViewPortClass.XAdd		; get xadd from viewport
-		add	edx,[ebx]GraphicViewPortClass.Pitch		; extra pitch of direct draw surface
-		mov	[VPwidth],eax				; store the width of locally
-		mov	[VPheight],ecx
-		mov	[VPxadd],edx
-		add	eax,edx
-		mov	[VPbpr],eax
-
-		;*===================================================================
-		;* move the important parameters into local registers
-		;*===================================================================
-		mov	eax,[x1_pixel]
-		mov	ebx,[y1_pixel]
-		mov	ecx,[x2_pixel]
-		mov	edx,[y2_pixel]
-
-		;*===================================================================
-		;* Convert the x2 and y2 pixel to a width and height
-		;*===================================================================
-		cmp	eax,ecx
-		jl	no_swap_x
-		xchg	eax,ecx
-
-	no_swap_x:
-		sub	ecx,eax
-		cmp	ebx,edx
-		jl	no_swap_y
-		xchg	ebx,edx
-	no_swap_y:
-		sub	edx,ebx
-		inc	ecx
-		inc	edx
-
-		;*===================================================================
-		;* Bounds check source X.
-		;*===================================================================
-		cmp	eax, [VPwidth]			; compare with the max
-		jge	done				; starts off screen, then later
-		jb	short sx_done			; if it's not negative, it's ok
-
-		;------ Clip source X to left edge of screen.
-		add	ecx, eax			; Reduce width (add in negative src X).
-		xor	eax, eax			; Clip to left of screen.
-	sx_done:
-
-		;*===================================================================
-		;* Bounds check source Y.
-		;*===================================================================
-		cmp	ebx, [VPheight]			; compare with the max
-		jge	done				; starts off screen, then later
-		jb	short sy_done			; if it's not negative, it's ok
-
-		;------ Clip source Y to top edge of screen.
-		add	edx, ebx			; Reduce height (add in negative src Y).
-		xor	ebx, ebx			; Clip to top of screen.
-
-	sy_done:
-		;*===================================================================
-		;* Bounds check width versus width of source and dest view ports
-		;*===================================================================
-		push	ebx				; save off ebx for later use
-		mov	ebx,[VPwidth]			; get the source width
-		sub	ebx, eax			; Maximum allowed pixel width (given coordinates).
-		sub	ebx, ecx			; Pixel width undershoot.
-		jns	short width_ok		; if not signed no adjustment necessary
-		add	ecx, ebx			; Reduce width to screen limits.
-
-	width_ok:
-		pop	ebx				; restore ebx to old value
-
-		;*===================================================================
-		;* Bounds check height versus height of source view port
-		;*===================================================================
-		push	eax				; save of eax for later use
-		mov	eax, [VPheight]			; get the source height
-		sub	eax, ebx			; Maximum allowed pixel height (given coordinates).
-		sub	eax, edx			; Pixel height undershoot.
-		jns	short height_ok		; if not signed no adjustment necessary
-		add	edx, eax			; Reduce height to screen limits.
-	height_ok:
-		pop	eax				; restore eax to old value
-
-		;*===================================================================
-		;* Perform the last minute checks on the width and height
-		;*===================================================================
-		or	ecx,ecx
-		jz	done
-
-		or	edx,edx
-		jz	done
-
-		cmp	ecx,[VPwidth]
-		ja	done
-		cmp	edx,[VPheight]
-		ja	done
-
-		;*===================================================================
-		;* Get the offset into the virtual viewport.
-		;*===================================================================
-		xchg	edi,eax			; save off the contents of eax
-		xchg	esi,edx			;   and edx for size test
-		mov	eax,ebx			; move the y pixel into eax
-		mul	[VPbpr]			; multiply by bytes per row
-		add	edi,eax			; add the result into the x position
-		mov	ebx,[this_object]
-		add	edi,[ebx]GraphicViewPortClass.Offset
-
-		mov	edx,esi			; restore edx back to real value
-		mov	eax,ecx			; store total width in ecx
-		sub	eax,[VPwidth]		; modify xadd value to include clipped
-		sub	[VPxadd],eax		;   width bytes (subtract a negative number)
-
-		;*===================================================================
-		; Convert the color byte to a DWORD for fast storing
-		;*===================================================================
-		mov	al,[color]				; get color to clear to
-		mov	ah,al					; extend across WORD
-		mov	ebx,eax					; extend across DWORD in
-		shl	eax,16					;   several steps
-		mov	ax,bx
-
-		;*===================================================================
-		; If there is no row offset then adjust the width to be the size of
-		;   the entire viewport and adjust the height to be 1
-		;*===================================================================
-		mov	esi,[VPxadd]
-		or	esi,esi					; set the flags for esi
-		jnz	row_by_row_aligned			;   and act on them
-
-		xchg	eax,ecx					; switch bit pattern and width
-		mul	edx					; multiply by edx to get size
-		xchg	eax,ecx					; switch size and bit pattern
-		mov	edx,1					; only 1 line off view port size to do
-
-		;*===================================================================
-		; Find out if we should bother to align the row.
-		;*===================================================================
-	row_by_row_aligned:
-		mov	[local_ebp],ecx					; width saved in ebp
-		cmp	ecx,OPTIMAL_BYTE_COPY			; is it worth aligning them?
-		jl	row_by_row				;   if not then skip
-
-		;*===================================================================
-		; Figure out the alignment offset if there is any
-		;*===================================================================
-		mov	ebx,edi					; get output position
-		and	ebx,3					;   is there a remainder?
-		jz	aligned_loop				;   if not we are aligned
-		xor	ebx,3					; find number of align bytes
-		inc	ebx					; this number is off by one
-		sub	[local_ebp],ebx					; subtract from width
-
-		;*===================================================================
-		; Now that we have the alignment offset copy each row
-		;*===================================================================
-	aligned_loop:
-		mov	ecx,ebx					; get number of bytes to align
-		rep	stosb					;   and move them over
-		mov	ecx,[local_ebp]					; get number of aligned bytes
-		shr	ecx,2					;   convert to DWORDS
-		rep	stosd					;   and move them over
-		mov	ecx,[local_ebp]					; get number of aligned bytes
-		and	ecx,3					;   find the remainder
-		rep	stosb					;   and move it over
-		add	edi,esi					; fix the line offset
-		dec	edx					; decrement the height
-		jnz	aligned_loop				; if more to do than do it
-		jmp	done					; we are all done
-
-		;*===================================================================
-		; If not enough bytes to bother aligning copy each line across a byte
-		;    at a time.
-		;*===================================================================
-	row_by_row:
-		mov	ecx,[local_ebp]					; get total width in bytes
-		rep	stosb					; store the width
-		add	edi,esi					; handle the xadd
-		dec	edx					; decrement the height
-		jnz	row_by_row				; if any left then next line
-	done:
+	//;* Convert the x2 and y2 pixel to a width and height
+	if (!(x < w)) {
+		t = x; x = w; w = t;
 	}
+	w = WW_Sub(w, x);
+	if (!(y < h)) {
+		t = y; y = h; h = t;
+	}
+	h = WW_Sub(h, y);
+	w = WW_Add(w, 1);
+	h = WW_Add(h, 1);
+
+	//;* Bounds check source X.
+	if (x >= VPwidth) return;					// starts off screen, then later
+	if (!((unsigned)x < (unsigned)VPwidth)) {	// if it's not negative, it's ok
+		w = WW_Add(w, x);						// Reduce width (add in negative src X).
+		x = 0;									// Clip to left of screen.
+	}
+
+	//;* Bounds check source Y.
+	if (y >= VPheight) return;
+	if (!((unsigned)y < (unsigned)VPheight)) {
+		h = WW_Add(h, y);
+		y = 0;
+	}
+
+	//;* Bounds check width versus width of source and dest view ports
+	t = WW_Sub(WW_Sub(VPwidth, x), w);			// Pixel width undershoot.
+	if (t < 0) w = WW_Add(w, t);				// Reduce width to screen limits.
+
+	//;* Bounds check height versus height of source view port
+	t = WW_Sub(WW_Sub(VPheight, y), h);
+	if (t < 0) h = WW_Add(h, t);
+
+	//;* Perform the last minute checks on the width and height
+	if (w == 0 || h == 0) return;
+	if ((unsigned)w > (unsigned)VPwidth) return;
+	if ((unsigned)h > (unsigned)VPheight) return;
+
+	//;* Get the offset into the virtual viewport.
+	unsigned char *dst = GVP_Base(this_object) + WW_Mul(y, VPbpr) + x;
+	VPxadd = WW_Sub(VPxadd, WW_Sub(w, VPwidth));	// modify xadd value to include clipped width bytes
+
+	// If there is no row offset then adjust the width to be the size of
+	//   the entire viewport and adjust the height to be 1
+	if (VPxadd == 0) {
+		w = WW_Mul(w, h);
+		h = 1;
+	}
+
+	// (The asm dword-aligned rows of OPTIMAL_BYTE_COPY bytes or more; the
+	// bytes written are the same.)
+	do {
+		memset(dst, color, (size_t)(unsigned)w);
+		dst += (unsigned)w;
+		dst += VPxadd;
+	} while (--h != 0);
 }
 
 
@@ -1306,75 +1128,18 @@ void __cdecl Buffer_Fill_Rect(void *thisptr, int sx, int sy, int dx, int dy, uns
 */
 void	__cdecl Buffer_Clear(void *this_object, unsigned char color)
 {
-	unsigned int local_color = color;
+	// webcandc: C++ port of the original x86 routine
+	unsigned char *dst = GVP_Base(this_object);
+	int height = GVP_Height(this_object);
+	int width = GVP_Width(this_object);
+	int modulo = GVP_Modulo(this_object);		// XAdd + Pitch: add for each line
 
-	__asm {
-
-		cld 		 				; always go forward
-
-		mov	ebx,[this_object]			; get a pointer to viewport
-		mov	edi,[ebx]GraphicViewPortClass.Offset	; get the correct offset
-		mov	edx,[ebx]GraphicViewPortClass.Height	; get height from viewport
-		mov	esi,[ebx]GraphicViewPortClass.Width		; get width from viewport
-		//push	[dword (GraphicViewPort ebx).GVPPitch]	; extra pitch of direct draw surface
-		push	[ebx]GraphicViewPortClass.Pitch
-
-		mov	ebx,[ebx]GraphicViewPortClass.XAdd		; esi = add for each line
-		add	ebx,[esp]				; Yes, I know its nasty but
-		add	esp,4					;      it works!
-
-		;*===================================================================
-		; Convert the color byte to a DWORD for fast storing
-		;*===================================================================
-		mov	al,[color]				; get color to clear to
-		mov	ah,al					; extend across WORD
-		mov	ecx,eax					; extend across DWORD in
-		shl	eax,16					;   several steps
-		mov	ax,cx
-
-		;*===================================================================
-		; Find out if we should bother to align the row.
-		;*===================================================================
-
-		cmp	esi , OPTIMAL_BYTE_COPY			; is it worth aligning them?
-		jl	byte_by_byte				;   if not then skip
-
-		;*===================================================================
-		; Figure out the alignment offset if there is any
-		;*===================================================================
-		push	ebx
-	
-	dword_aligned_loop:
-		    mov	ecx , edi
-		    mov	ebx , esi
-		    neg	ecx
-		    and	ecx , 3
-		    sub	ebx , ecx
-		    rep	stosb
-		    mov	ecx , ebx
-		    shr	ecx , 2
-		    rep	stosd
-		    mov	ecx , ebx
-		    and	ecx , 3
-		    rep	stosb
-		    add	edi , [ esp ]
-		    dec	edx					; decrement the height
-		    jnz	dword_aligned_loop				; if more to do than do it
-		    pop	eax
-			 jmp	done
-		    //ret
-
-		;*===================================================================
-		; If not enough bytes to bother aligning copy each line across a byte
-		;    at a time.
-		;*===================================================================
-	byte_by_byte:
-		mov	ecx,esi					; get total width in bytes
-		rep	stosb					; store the width
-		add	edi,ebx					; handle the xadd
-		dec	edx					; decrement the height
-		jnz	byte_by_byte				; if any left then next line
-	done:
+	// (The asm dword-aligned rows of OPTIMAL_BYTE_COPY bytes or more; the
+	// bytes written are the same.)
+	for (; height > 0; height--) {
+		if (width > 0) memset(dst, color, (size_t)width);
+		dst += width;
+		dst += modulo;
 	}
 }
 
@@ -1420,6 +1185,7 @@ BOOL __cdecl Linear_Blit_To_Linear(	void *this_object, void * dest, int x_pixel,
         LOCAL	dest_area :  dword
 */
 	
+	// webcandc: C++ port of the original x86 routine
 	int	x1_pixel;
 	int	y1_pixel;
 	int	dest_x1;
@@ -1428,417 +1194,121 @@ BOOL __cdecl Linear_Blit_To_Linear(	void *this_object, void * dest, int x_pixel,
 	int	dest_adjust_width;
 	int	source_area;
 	int	dest_area;
-	
-	__asm {	
-	
-		;This Clipping algorithm is a derivation of the very well known
-		;Cohen-Sutherland Line-Clipping test. Due to its simplicity and efficiency
-		;it is probably the most commontly implemented algorithm both in software
-		;and hardware for clipping lines, rectangles, and convex polygons against
-		;a rectagular clipping window. For reference see
-		;"COMPUTER GRAPHICS principles and practice by Foley, Vandam, Feiner, Hughes
-		; pages 113 to 177".
-		; Briefly consist in computing the Sutherland code for both end point of
-		; the rectangle to find out if the rectangle is:
-		; - trivially accepted (no further clipping test, display rectangle)
-		; - trivially rejected (return with no action)
-		; - retangle must be iteratively clipped again edges of the clipping window
-		;   and the remaining retangle is display.
+	unsigned code0;
+	unsigned code1;
 
-		; Clip Source Rectangle against source Window boundaries.
-			mov  	esi,[this_object]    ; get ptr to src
-			xor 	ecx,ecx		    ; Set sutherland code to zero
-			xor 	edx,edx		    ; Set sutherland code to zero
+	// This Clipping algorithm is a derivation of the very well known
+	// Cohen-Sutherland Line-Clipping test (see Clip_Rect).
 
-		   ; compute the difference in the X axis and get the bit signs into ecx , edx
-			mov	edi,[esi]GraphicViewPortClass.Width  ; get width into register
-			mov	ebx,[x_pixel]	    ; Get first end point x_pixel into register
-			mov	eax,[x_pixel]	    ; Get second end point x_pixel into register
-			add	ebx,[pixel_width]   ; second point x1_pixel = x + width
-			shld	ecx, eax,1	    ; the sign bit of x_pixel is sutherland code0 bit4
-			mov	[x1_pixel],ebx	    ; save second for future use
-			inc	edi		    ; move the right edge by one unit
-			shld	edx,ebx,1	    ; the sign bit of x1_pixel is sutherland code0 bit4
-			sub	eax,edi		    ; compute the difference x0_pixel - width
-			sub	ebx,edi		    ; compute the difference x1_pixel - width
-			shld	ecx,eax,1	    ; the sign bit of the difference is sutherland code0 bit3
-			shld	edx,ebx,1	    ; the sign bit of the difference is sutherland code0 bit3
-
-		   ; the following code is just a repeticion of the above code
-		   ; in the Y axis.
-			mov	edi,[esi]GraphicViewPortClass.Height ; get height into register
-			mov	ebx,[y_pixel]
-			mov	eax,[y_pixel]
-			add	ebx,[pixel_height]
-			shld	ecx,eax,1
-			mov	[y1_pixel ],ebx
-			inc	edi
-			shld	edx,ebx,1
-			sub	eax,edi
-			sub	ebx,edi
-			shld	ecx,eax,1
-			shld	edx,ebx,1
-
-		    ; Here we have the to Sutherland code into cl and dl
-			xor	cl,5		       ; bit 2 and 0 are complented, reverse then
-			xor	dl,5		       ; bit 2 and 0 are complented, reverse then
-			mov	al,cl		       ; save code1 in case we have to clip iteratively
-			test	dl,cl		       ; if any bit in code0 and its counter bit
-			jnz	real_out	       ; in code1 is set then the rectangle in outside
-			or	al,dl		       ; if all bit of code0 the counter bit in
-			jz	clip_against_dest    ; in code1 is set to zero, then all
-						       ; end points of the rectangle are
-						       ; inside the clipping window
-
-		     ; if we are here the polygon have to be clip iteratively
-			test	cl,1000b	       ; if bit 4 in code0 is set then
-			jz	scr_left_ok	       ; x_pixel is smaller than zero
-			mov	[x_pixel],0	       ; set x_pixel to cero.
-
-		scr_left_ok:
-			test	cl,0010b	       ; if bit 2 in code0 is set then
-			jz	scr_bottom_ok	       ; y_pixel is smaller than zero
-			mov	[ y_pixel ],0	       ; set y_pixel to cero.
-
-		scr_bottom_ok:
-			test	dl,0100b	       ; if bit 3 in code1 is set then
-			jz	scr_right_ok	       ; x1_pixel is greater than the width
-			mov	eax,[esi]GraphicViewPortClass.Width ; get width into register
-			mov	[ x1_pixel ],eax       ; set x1_pixel to width.
-		scr_right_ok:
-			test	dl,0001b	       ; if bit 0 in code1 is set then
-			jz	clip_against_dest    ; y1_pixel is greater than the width
-			mov	eax,[esi]GraphicViewPortClass.Height  ; get height into register
-			mov	[ y1_pixel ],eax       ; set y1_pixel to height.
-
-		; Clip Source Rectangle against destination Window boundaries.
-		clip_against_dest:
-
-		   ; build the destination rectangle before clipping
-		   ; dest_x1 = dest_x0 + ( x1_pixel - x_pixel )
-		   ; dest_y1 = dest_y0 + ( y1_pixel - y_pixel )
-			mov	eax,[dest_x0]	     ; get dest_x0 into eax
-			mov	ebx,[dest_y0]	     ; get dest_y0 into ebx
-			sub	eax,[x_pixel]	     ; subtract x_pixel from eax
-			sub	ebx,[y_pixel]	     ; subtract y_pixel from ebx
-			add	eax,[x1_pixel]	     ; add x1_pixel to eax
-			add	ebx,[y1_pixel]	     ; add y1_pixel to ebx
-			mov	[dest_x1],eax	     ; save eax into dest_x1
-			mov	[dest_y1],ebx	     ; save eax into dest_y1
-
-
-		  ; The followin code is a repeticion of the Sutherland clipping
-		  ; descrived above.
-			mov  	esi,[dest]	    ; get ptr to src
-			xor 	ecx,ecx
-			xor 	edx,edx
-			mov	edi,[esi]GraphicViewPortClass.Width  ; get width into register
-			mov	eax,[dest_x0]
-			mov	ebx,[dest_x1]
-			shld	ecx,eax,1
-			inc	edi
-			shld	edx,ebx,1
-			sub	eax,edi
-			sub	ebx,edi
-			shld	ecx,eax,1
-			shld	edx,ebx,1
-
-			mov	edi,[esi]GraphicViewPortClass.Height ; get height into register
-			mov	eax,[dest_y0]
-			mov	ebx,[dest_y1]
-			shld	ecx,eax,1
-			inc	edi
-			shld	edx,ebx,1
-			sub	eax,edi
-			sub	ebx,edi
-			shld	ecx,eax,1
-			shld	edx,ebx,1
-
-			xor	cl,5
-			xor	dl,5
-			mov	al,cl
-			test	dl,cl
-			jnz	real_out
-			or	al,dl
-			jz	do_blit
-
-			test	cl,1000b
-			jz	dest_left_ok
-			mov	eax,[ dest_x0 ]
-			mov	[ dest_x0 ],0
-			sub	[ x_pixel ],eax
-
-		dest_left_ok:
-			test	cl,0010b
-			jz	dest_bottom_ok
-			mov	eax,[ dest_y0 ]
-			mov	[ dest_y0 ],0
-			sub	[ y_pixel ],eax
-
-
-		dest_bottom_ok:
-			test	dl,0100b
-			jz	dest_right_ok
-			mov	ebx,[esi]GraphicViewPortClass.Width  ; get width into register
-			mov	eax,[ dest_x1 ]
-			mov	[ dest_x1 ],ebx
-			sub	eax,ebx
-			sub	[ x1_pixel ],eax
-
-		dest_right_ok:
-			test	dl,0001b
-			jz	do_blit
-			mov	ebx,[esi]GraphicViewPortClass.Height  ; get width into register
-			mov	eax,[ dest_y1 ]
-			mov	[ dest_y1 ],ebx
-			sub	eax,ebx
-			sub	[ y1_pixel ],eax
-
-
-		; Here is where	we do the actual blit
-		do_blit:
-		       cld
-		       mov	ebx,[this_object]
-		       mov	esi,[ebx]GraphicViewPortClass.Offset
-		       mov	eax,[ebx]GraphicViewPortClass.XAdd
-		       add	eax,[ebx]GraphicViewPortClass.Width
-		       add	eax,[ebx]GraphicViewPortClass.Pitch
-		       mov	ecx,eax
-		       mul	[y_pixel]
-		       add	esi,[x_pixel]
-		       mov	[source_area],ecx
-		       add	esi,eax
-
-		       add	ecx,[x_pixel ]
-		       sub	ecx,[x1_pixel ]
-		       mov	[scr_adjust_width ],ecx
-
-		       mov	ebx,[dest]
-		       mov	edi,[ebx]GraphicViewPortClass.Offset
-		       mov	eax,[ebx]GraphicViewPortClass.XAdd
-		       add	eax,[ebx]GraphicViewPortClass.Width
-		       add	eax,[ebx]GraphicViewPortClass.Pitch
-		       mov	ecx,eax
-		       mul	[ dest_y0 ]
-		       add	edi,[ dest_x0 ]
-		       mov	[ dest_area ],ecx
-		       add	edi,eax
-
-		       mov	eax,[ dest_x1 ]
-		       sub	eax,[ dest_x0 ]
-		       jle	real_out
-		       sub	ecx,eax
-		       mov	[ dest_adjust_width ],ecx
-
-		       mov	edx,[ dest_y1 ]
-		       sub	edx,[ dest_y0 ]
-		       jle	real_out
-
-		       cmp	esi,edi
-		       jz	real_out
-		       jl	backupward_blit
-
-		; ********************************************************************
-		; Forward bitblit
-
-		       test	[ trans ],1
-		       jnz	forward_Blit_trans
-
-
-		; the inner loop is so efficient that
-		; the optimal consept no longer apply because
-		; the optimal byte have to by a number greather than 9 bytes
-		       cmp	eax,10
-		       jl	forward_loop_bytes
-
-		forward_loop_dword:
-		       mov	ecx,edi
-		       mov	ebx,eax
-		       neg	ecx
-		       and	ecx,3
-		       sub	ebx,ecx
-		       rep	movsb
-		       mov	ecx,ebx
-		       shr	ecx,2
-		       rep	movsd
-		       mov	ecx,ebx
-		       and	ecx,3
-		       rep	movsb
-		       add	esi,[ scr_adjust_width ]
-		       add	edi,[ dest_adjust_width ]
-		       dec	edx
-		       jnz	forward_loop_dword
-		       jmp	real_out	//ret
-
-		forward_loop_bytes:
-		       mov	ecx,eax
-		       rep	movsb
-		       add	esi,[ scr_adjust_width ]
-		       add	edi,[ dest_adjust_width ]
-		       dec	edx
-		       jnz	forward_loop_bytes
-		       jmp	real_out
-
-		forward_Blit_trans:
-		       mov	ecx,eax
-		       and	ecx,01fh
-		       lea	ecx,[ ecx + ecx * 4 ]
-		       neg	ecx
-		       shr	eax,5
-		       lea	ecx,[ transp_reference + ecx * 2 ]
-		       mov	[ y1_pixel ],ecx
-
-		forward_loop_trans:
-		       mov	ecx,eax
-		       jmp	[ y1_pixel ]
-		forward_trans_line:
-		       //REPT	32
-		       //local	transp_pixel
-				 //No REPT in msvc inline assembly.
-				 // Save ECX and use as counter instead. ST - 12/19/2018 5:41PM
-				 push	ecx
-				 mov	ecx, 32
-
-		rept_loop:
-				mov	bl,[ esi ]
-				test	bl,bl
-				jz		transp_pixel
-				mov	[ edi ],bl
-		transp_pixel:
-				inc	esi
-				inc	edi
-
-				dec	ecx			//ST - 12/19/2018 5:44PM
-				jnz	rept_loop	//ST - 12/19/2018 5:44PM
-
-				pop	ecx			//ST - 12/19/2018 5:44PM
-
-			//ENDM
-		    transp_reference:
-		       dec	ecx
-		       jge	forward_trans_line
-		       add	esi,[ scr_adjust_width ]
-		       add	edi,[ dest_adjust_width ]
-		       dec	edx
-		       jnz	forward_loop_trans
-		       jmp	real_out		//ret
-
-
-		; ************************************************************************
-		; backward bitblit
-
-		backupward_blit:
-
-			mov	ebx,[ source_area ]
-			dec	edx
-			add	esi,eax
-			imul    ebx,edx
-			std
-			lea	esi,[ esi + ebx - 1 ]
-
-			mov	ebx,[ dest_area ]
-			add	edi,eax
-			imul    ebx,edx
-			lea	edi,[ edi + ebx - 1]
-
-		       test	[ trans ],1
-		       jnz	backward_Blit_trans
-
-		        cmp	eax,15
-		        jl	backward_loop_bytes
-
-		backward_loop_dword:
-			push	edi
-			push	esi
-			lea	ecx,[edi+1]
-			mov	ebx,eax
-			and	ecx,3		; Get non aligned bytes.
-			sub	ebx,ecx		; remove that from the total size to be copied later.
-			rep	movsb		; do the copy.
-			sub	esi,3
-			mov	ecx,ebx		; Get number of bytes left.
-		 	sub	edi,3
-			shr	ecx,2		; Do 4 bytes at a time.
-			rep	movsd		; do the dword copy.
-			mov	ecx,ebx
-			add	esi,3
-			add	edi,3
-			and	ecx,03h
-			rep	movsb		; finnish the remaining bytes.
-			pop	esi
-			pop	edi
-		        sub	esi,[ source_area ]
-		        sub	edi,[ dest_area ]
-			dec	edx
-			jge	backward_loop_dword
-			cld
-			jmp	real_out		//ret
-
-		backward_loop_bytes:
-			push	edi
-			mov	ecx,eax		; remove that from the total size to be copied later.
-			push	esi
-			rep	movsb		; do the copy.
-			pop	esi
-			pop	edi
-		        sub	esi,[ source_area ]
-		        sub	edi,[ dest_area ]
-			dec	edx
-			jge	backward_loop_bytes
-			cld
-			jmp	real_out		//ret
-
-		backward_Blit_trans:
-		       mov	ecx,eax
-		       and	ecx,01fh
-		       lea	ecx,[ ecx + ecx * 4 ]
-		       neg	ecx
-		       shr	eax,5
-		       lea	ecx,[ back_transp_reference + ecx * 2 ]
-		       mov	[ y1_pixel ],ecx
-
-		backward_loop_trans:
-		       mov	ecx,eax
-		       push	edi
-		       push	esi
-		       jmp	[ y1_pixel ]
-		backward_trans_line:
-		       //REPT	32
-		       //local	transp_pixel2
-				 //No REPT in msvc inline assembly.
-				 // Save ECX and use as counter instead. ST - 12/19/2018 5:41PM
-				 push	ecx
-				 mov	ecx, 32
-		rept_loop2:
-				 mov	bl,[ esi ]
-				 test	bl,bl
-				 jz	transp_pixel2
-				 mov	[ edi ],bl
-		transp_pixel2:
-				 dec	esi
-				 dec	edi
-
-				 dec	ecx				//ST - 12/19/2018 5:44PM
-				 jnz	rept_loop2		//ST - 12/19/2018 5:44PM
-
-				 pop	ecx				//ST - 12/19/2018 5:44PM
-			
-			//ENDM
-		    
-			 back_transp_reference:
-		       dec	ecx
-		       jge	backward_trans_line
-		       pop	esi
-		       pop	edi
-		       sub	esi,[ source_area ]
-		       sub	edi,[ dest_area ]
-		       dec	edx
-		       jge	backward_loop_trans
-		       cld
-		       //ret
-
-		real_out:
+	// Clip Source Rectangle against source Window boundaries.
+	int win_w = GVP_Width(this_object);
+	int win_h = GVP_Height(this_object);
+	x1_pixel = WW_Add(x_pixel, pixel_width);
+	y1_pixel = WW_Add(y_pixel, pixel_height);
+	code0 = WW_Clip_Code(x_pixel, y_pixel, win_w, win_h);
+	code1 = WW_Clip_Code(x1_pixel, y1_pixel, win_w, win_h);
+	if (code0 & code1) return 0;			// the rectangle is outside
+	if (code0 | code1) {
+		if (code0 & 8) x_pixel = 0;
+		if (code0 & 2) y_pixel = 0;
+		if (code1 & 4) x1_pixel = win_w;
+		if (code1 & 1) y1_pixel = win_h;
 	}
+
+	// Clip Source Rectangle against destination Window boundaries.
+	// build the destination rectangle before clipping
+	dest_x1 = WW_Add(WW_Sub(dest_x0, x_pixel), x1_pixel);
+	dest_y1 = WW_Add(WW_Sub(dest_y0, y_pixel), y1_pixel);
+	win_w = GVP_Width(dest);
+	win_h = GVP_Height(dest);
+	code0 = WW_Clip_Code(dest_x0, dest_y0, win_w, win_h);
+	code1 = WW_Clip_Code(dest_x1, dest_y1, win_w, win_h);
+	if (code0 & code1) return 0;
+	if (code0 | code1) {
+		if (code0 & 8) {
+			x_pixel = WW_Sub(x_pixel, dest_x0);
+			dest_x0 = 0;
+		}
+		if (code0 & 2) {
+			y_pixel = WW_Sub(y_pixel, dest_y0);
+			dest_y0 = 0;
+		}
+		if (code1 & 4) {
+			x1_pixel = WW_Sub(x1_pixel, WW_Sub(dest_x1, win_w));
+			dest_x1 = win_w;
+		}
+		if (code1 & 1) {
+			y1_pixel = WW_Sub(y1_pixel, WW_Sub(dest_y1, win_h));
+			dest_y1 = win_h;
+		}
+	}
+
+	// Here is where we do the actual blit
+	source_area = GVP_Stride(this_object);
+	unsigned char *src = GVP_Base(this_object) + WW_Mul(source_area, y_pixel) + x_pixel;
+	scr_adjust_width = WW_Sub(WW_Add(source_area, x_pixel), x1_pixel);
+
+	dest_area = GVP_Stride(dest);
+	unsigned char *dst = GVP_Base(dest) + WW_Mul(dest_area, dest_y0) + dest_x0;
+
+	if (dest_x1 <= dest_x0) return 0;
+	int width = WW_Sub(dest_x1, dest_x0);
+	dest_adjust_width = WW_Sub(dest_area, width);
+
+	if (dest_y1 <= dest_y0) return 0;
+	int height = WW_Sub(dest_y1, dest_y0);
+
+	if (src == dst) return 0;
+
+	if ((intptr_t)src > (intptr_t)dst) {
+		// ********************************************************************
+		// Forward bitblit
+		if (trans & 1) {
+			do {
+				for (int i = 0; i < width; i++) {
+					unsigned char pixel = src[i];
+					if (pixel) dst[i] = pixel;
+				}
+				src += width;
+				dst += width;
+				src += scr_adjust_width;
+				dst += dest_adjust_width;
+			} while (--height != 0);
+		} else {
+			do {
+				WW_Copy_Forward(dst, src, width);
+				src += width;
+				dst += width;
+				src += scr_adjust_width;
+				dst += dest_adjust_width;
+			} while (--height != 0);
+		}
+	} else {
+		// ************************************************************************
+		// backward bitblit (start from the last byte of the last row)
+		height--;
+		src += width;
+		src += WW_Mul(source_area, height) - 1;
+		dst += width;
+		dst += WW_Mul(dest_area, height) - 1;
+		if (trans & 1) {
+			do {
+				for (int i = 0; i < width; i++) {
+					unsigned char pixel = src[-i];
+					if (pixel) dst[-i] = pixel;
+				}
+				src -= source_area;
+				dst -= dest_area;
+			} while (--height >= 0);
+		} else {
+			do {
+				WW_Copy_Backward(dst, src, width);
+				src -= source_area;
+				dst -= dest_area;
+			} while (--height >= 0);
+		}
+	}
+	return 0;
 }
 
 
@@ -1919,6 +1389,7 @@ BOOL __cdecl Linear_Scale_To_Linear(void *this_object, void *dest, int src_x, in
 	local	entry : dword
 */
 	
+	// webcandc: C++ port of the original x86 routine
 	int src_x0;
 	int src_y0;
 	int src_x1;
@@ -1934,688 +1405,176 @@ BOOL __cdecl Linear_Scale_To_Linear(void *this_object, void *dest, int src_x, in
 	int dy_intr;
 	int dy_frac;
 	int dy_acc;
-	int dx_frac;
+	unsigned dx_intr;
+	unsigned dx_frac;
 
 	int counter_x;
 	int counter_y;
-	int remap_counter;
-	int entry;
-	
-	
-	__asm {
-		
-		;*===================================================================
-		;* Check for scale error when to or from size 0,0
-		;*===================================================================
-		cmp	[dst_width],0
-		je	all_done
-		cmp	[dst_height],0
-		je	all_done
-		cmp	[src_width],0
-		je	all_done
-		cmp	[src_height],0
-		je	all_done
+	unsigned code0;
+	unsigned code1;
+	int win_w;
+	int win_h;
 
-		mov	eax , [ src_x ]
-		mov	ebx , [ src_y ]
-		mov	[ src_x0 ] , eax
-		mov	[ src_y0 ] , ebx
-		add	eax , [ src_width ]
-		add	ebx , [ src_height ]
-		mov	[ src_x1 ] , eax
-		mov	[ src_y1 ] , ebx
+	//;* Check for scale error when to or from size 0,0
+	if (dst_width == 0 || dst_height == 0 || src_width == 0 || src_height == 0) return TRUE;
 
-		mov	eax , [ dst_x ]
-		mov	ebx , [ dst_y ]
-		mov	[ dst_x0 ] , eax
-		mov	[ dst_y0 ] , ebx
-		add	eax , [ dst_width ]
-		add	ebx , [ dst_height ]
-		mov	[ dst_x1 ] , eax
-		mov	[ dst_y1 ] , ebx
+	src_x0 = src_x;
+	src_y0 = src_y;
+	src_x1 = WW_Add(src_x, src_width);
+	src_y1 = WW_Add(src_y, src_height);
 
-	; Clip Source Rectangle against source Window boundaries.
-		mov  	esi , [ this_object ]	    ; get ptr to src
-		xor 	ecx , ecx
-		xor 	edx , edx
-		mov	edi , [esi]GraphicViewPortClass.Width  ; get width into register
-		mov	eax , [ src_x0 ]
-		mov	ebx , [ src_x1 ]
-		shld	ecx , eax , 1
-		inc	edi
-		shld	edx , ebx , 1
-		sub	eax , edi
-		sub	ebx , edi
-		shld	ecx , eax , 1
-		shld	edx , ebx , 1
+	dst_x0 = dst_x;
+	dst_y0 = dst_y;
+	dst_x1 = WW_Add(dst_x, dst_width);
+	dst_y1 = WW_Add(dst_y, dst_height);
 
-		mov	edi,[esi]GraphicViewPortClass.Height ; get height into register
-		mov	eax , [ src_y0 ]
-		mov	ebx , [ src_y1 ]
-		shld	ecx , eax , 1
-		inc	edi
-		shld	edx , ebx , 1
-		sub	eax , edi
-		sub	ebx , edi
-		shld	ecx , eax , 1
-		shld	edx , ebx , 1
-
-		xor	cl , 5
-		xor	dl , 5
-		mov	al , cl
-		test	dl , cl
-		jnz	all_done
-		or	al , dl
-		jz	clip_against_dest
-		mov	bl , dl
-		test	cl , 1000b
-		jz	src_left_ok
-		xor	eax , eax
-		mov	[ src_x0 ] , eax
-		sub	eax , [ src_x ]
-		imul	[ dst_width ]
-		idiv	[ src_width ]
-		add	eax , [ dst_x ]
-		mov	[ dst_x0 ] , eax
-
-	src_left_ok:
-		test	cl , 0010b
-		jz	src_bottom_ok
-		xor	eax , eax
-		mov	[ src_y0 ] , eax
-		sub	eax , [ src_y ]
-		imul	[ dst_height ]
-		idiv	[ src_height ]
-		add	eax , [ dst_y ]
-		mov	[ dst_y0 ] , eax
-
-	src_bottom_ok:
-		test	bl , 0100b
-		jz	src_right_ok
-		mov	eax , [esi]GraphicViewPortClass.Width  ; get width into register
-		mov	[ src_x1 ] , eax
-		sub	eax , [ src_x ]
-		imul	[ dst_width ]
-		idiv	[ src_width ]
-		add	eax , [ dst_x ]
-		mov	[ dst_x1 ] , eax
-
-	src_right_ok:
-		test	bl , 0001b
-		jz	clip_against_dest
-		mov	eax , [esi]GraphicViewPortClass.Height  ; get width into register
-		mov	[ src_y1 ] , eax
-		sub	eax , [ src_y ]
-		imul	[ dst_height ]
-		idiv	[ src_height ]
-		add	eax , [ dst_y ]
-		mov	[ dst_y1 ] , eax
-
-	; Clip destination Rectangle against source Window boundaries.
-	clip_against_dest:
-		mov  	esi , [ dest ]	    ; get ptr to src
-		xor 	ecx , ecx
-		xor 	edx , edx
-		mov	edi , [esi]GraphicViewPortClass.Width  ; get width into register
-		mov	eax , [ dst_x0 ]
-		mov	ebx , [ dst_x1 ]
-		shld	ecx , eax , 1
-		inc	edi
-		shld	edx , ebx , 1
-		sub	eax , edi
-		sub	ebx , edi
-		shld	ecx , eax , 1
-		shld	edx , ebx , 1
-
-		mov	edi,[esi]GraphicViewPortClass.Height ; get height into register
-		mov	eax , [ dst_y0 ]
-		mov	ebx , [ dst_y1 ]
-		shld	ecx , eax , 1
-		inc	edi
-		shld	edx , ebx , 1
-		sub	eax , edi
-		sub	ebx , edi
-		shld	ecx , eax , 1
-		shld	edx , ebx , 1
-
-		xor	cl , 5
-		xor	dl , 5
-		mov	al , cl
-		test	dl , cl
-		jnz	all_done
-		or	al , dl
-		jz	do_scaling
-		mov	bl , dl
-		test	cl , 1000b
-		jz	dst_left_ok
-		xor	eax , eax
-		mov	[ dst_x0 ] , eax
-		sub	eax , [ dst_x ]
-		imul	[ src_width ]
-		idiv	[ dst_width ]
-		add	eax , [ src_x ]
-		mov	[ src_x0 ] , eax
-
-	dst_left_ok:
-		test	cl , 0010b
-		jz	dst_bottom_ok
-		xor	eax , eax
-		mov	[ dst_y0 ] , eax
-		sub	eax , [ dst_y ]
-		imul	[ src_height ]
-		idiv	[ dst_height ]
-		add	eax , [ src_y ]
-		mov	[ src_y0 ] , eax
-
-	dst_bottom_ok:
-		test	bl , 0100b
-		jz	dst_right_ok
-		mov	eax , [esi]GraphicViewPortClass.Width  ; get width into register
-		mov	[ dst_x1 ] , eax
-		sub	eax , [ dst_x ]
-		imul	[ src_width ]
-		idiv	[ dst_width ]
-		add	eax , [ src_x ]
-		mov	[ src_x1 ] , eax
-
-	dst_right_ok:
-		test	bl , 0001b
-		jz	do_scaling
-
-		mov	eax , [esi]GraphicViewPortClass.Height  ; get width into register
-		mov	[ dst_y1 ] , eax
-		sub	eax , [ dst_y ]
-		imul	[ src_height ]
-		idiv	[ dst_height ]
-		add	eax , [ src_y ]
-		mov	[ src_y1 ] , eax
-
-	do_scaling:
-
-   	    cld
-   	    mov	ebx , [ this_object ]
-   	    mov	esi , [ebx]GraphicViewPortClass. Offset
-   	    mov	eax , [ebx]GraphicViewPortClass. XAdd
-   	    add	eax , [ebx]GraphicViewPortClass. Width
-   	    add	eax , [ebx]GraphicViewPortClass. Pitch
-   	    mov	[ src_win_width ] , eax
-   	    mul	[ src_y0 ]
-   	    add	esi , [ src_x0 ]
-   	    add	esi , eax
-
-   	    mov	ebx , [ dest ]
-   	    mov	edi , [ebx]GraphicViewPortClass. Offset
-   	    mov	eax , [ebx]GraphicViewPortClass. XAdd
-   	    add	eax , [ebx]GraphicViewPortClass. Width
-   	    add	eax , [ebx]GraphicViewPortClass. Pitch
-   	    mov	[ dst_win_width ] , eax
-   	    mul	[ dst_y0 ]
-   	    add	edi , [ dst_x0 ]
-   	    add	edi , eax
-
-   	    mov	eax , [ src_height ]
-   	    xor	edx , edx
-   	    mov	ebx , [ dst_height ]
-   	    idiv	[ dst_height ]
-   	    imul	eax , [ src_win_width ]
-   	    neg	ebx
-   	    mov	[ dy_intr ] , eax
-   	    mov	[ dy_frac ] , edx
-   	    mov	[ dy_acc ]  , ebx
-
-   	    mov	eax , [ src_width ]
-   	    xor	edx , edx
-   	    shl	eax , 16
-   	    idiv	[ dst_width ]
-   	    xor	edx , edx
-   	    shld	edx , eax , 16
-   	    shl	eax , 16
-
-   	    mov	ecx , [ dst_y1 ]
-   	    mov	ebx , [ dst_x1 ]
-   	    sub	ecx , [ dst_y0 ]
-   	    jle	all_done
-   	    sub	ebx , [ dst_x0 ]
-   	    jle	all_done
-
-   	    mov	[ counter_y ] , ecx
-
-   	    cmp	[ trans ] , 0
-   	    jnz	transparency
-
-   	    cmp	[ remap ] , 0
-   	    jnz	normal_remap
-
-	; *************************************************************************
-	; normal scale
-   	    mov	ecx , ebx
-   	    and	ecx , 01fh
-   	    lea	ecx , [ ecx + ecx * 2 ]
-   	    shr	ebx , 5
-   	    neg	ecx
-   	    mov	[ counter_x ] , ebx
-   	    lea	ecx , [ ref_point + ecx + ecx * 2 ]
-   	    mov	[ entry ] , ecx
-
- 	outter_loop:
-   	    push	esi
-   	    push	edi
-   	    xor	ecx , ecx
-   	    mov	ebx , [ counter_x ]
-   	    jmp	[ entry ]
- 	inner_loop:
-   	    // REPT not supported for inline asm. ST - 12/19/2018 6:11PM
-			 //REPT	32
-			 	push ebx		//ST - 12/19/2018 6:11PM
-				mov ebx,32	//ST - 12/19/2018 6:11PM
-rept_loop:
-		       mov	cl , [ esi ]
-		       add	ecx , eax
-		       adc	esi , edx
-		       mov	[ edi ] , cl
-		       inc	edi
-
-				dec ebx				//ST - 12/19/2018 6:11PM
-				jnz rept_loop		//ST - 12/19/2018 6:11PM
-				pop ebx				//ST - 12/19/2018 6:11PM
-   	    //ENDM
- 	ref_point:
-   	    dec	ebx
-   	    jge	inner_loop
-
-   	    pop	edi
-   	    pop	esi
-   	    add	edi , [ dst_win_width ]
-   	    add	esi , [ dy_intr ]
-
-   	    mov	ebx , [ dy_acc ]
-   	    add	ebx , [ dy_frac ]
-   	    jle	skip_line
-   	    add	esi , [ src_win_width ]
-   	    sub	ebx , [ dst_height ]
-	skip_line:
-		dec	[ counter_y ]
-		mov	[ dy_acc ] , ebx
-		jnz	outter_loop
-		jmp	all_done	//ret
-
-
-	; *************************************************************************
-	; normal scale with remap
-
-	normal_remap:
-   	    mov	ecx , ebx
-   	    mov	[ dx_frac ], eax
-   	    and	ecx , 01fh
-   	    mov	eax , [ remap ]
-   	    shr	ebx , 5
-   	    imul	ecx , - 13
-   	    mov	[ counter_x ] , ebx
-   	    lea	ecx , [ remapref_point + ecx ]
-   	    mov	[ entry ] , ecx
-
- 	remapoutter_loop:
-   	    mov	ebx , [ counter_x ]
-   	    push	esi
-   	    mov	[ remap_counter ] , ebx
-   	    push	edi
-   	    xor	ecx , ecx
-   	    xor	ebx , ebx
-   	    jmp	[ entry ]
- 	remapinner_loop:
-   	    // REPT not supported for inline asm. ST - 12/19/2018 6:11PM
-			 //REPT	32
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-		       mov	bl , [ esi ]
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		       inc	edi
-
-   	    //ENDM
- 	remapref_point:
-   	    dec	[ remap_counter ]
-   	    jge	remapinner_loop
-
-   	    pop	edi
-   	    pop	esi
-   	    add	edi , [ dst_win_width ]
-   	    add	esi , [ dy_intr ]
-
-   	    mov	ebx , [ dy_acc ]
-   	    add	ebx , [ dy_frac ]
-   	    jle	remapskip_line
-   	    add	esi , [ src_win_width ]
-   	    sub	ebx , [ dst_height ]
-	remapskip_line:
-		dec	[ counter_y ]
-		mov	[ dy_acc ] , ebx
-		jnz	remapoutter_loop
-		jmp	all_done	//ret
-
-
-	;****************************************************************************
-	; scale with trnsparency
-
-	transparency:
-   	    cmp	[ remap ] , 0
-   	    jnz	trans_remap
-
-	; *************************************************************************
-	; normal scale with transparency
-   	    mov	ecx , ebx
-   	    and	ecx , 01fh
-   	    imul	ecx , -13
-   	    shr	ebx , 5
-   	    mov	[ counter_x ] , ebx
-   	    lea	ecx , [ trans_ref_point + ecx ]
-   	    mov	[ entry ] , ecx
-
- 	trans_outter_loop:
-   	    xor	ecx , ecx
-   	    push	esi
-   	    push	edi
-   	    mov	ebx , [ counter_x ]
-   	    jmp	[ entry ]
- 	trans_inner_loop:
-   	    
-   	    // REPT not supported for inline asm. ST - 12/19/2018 6:11PM
-			 //REPT	32
-			 	push ebx		//ST - 12/19/2018 6:11PM
-				mov ebx,32	//ST - 12/19/2018 6:11PM
-rept_loop2:
-			 
-		       mov	cl , [ esi ]
-		       test	cl , cl
-		       jz	trans_pixel
-		       mov	[ edi ] , cl
-   	    trans_pixel:
-		       add	ecx , eax
-		       adc	esi , edx
-		       inc	edi
-				
-				dec ebx				//ST - 12/19/2018 6:11PM
-				jnz rept_loop2		//ST - 12/19/2018 6:11PM
-				pop ebx				//ST - 12/19/2018 6:11PM
-   	    
-			 //ENDM
- 	trans_ref_point:
-   	    dec	ebx
-   	    jge	trans_inner_loop
-
-   	    pop	edi
-   	    pop	esi
-   	    add	edi , [ dst_win_width ]
-   	    add	esi , [ dy_intr ]
-
-   	    mov	ebx , [ dy_acc ]
-   	    add	ebx , [ dy_frac ]
-   	    jle	trans_skip_line
-   	    add	esi , [ src_win_width ]
-   	    sub	ebx , [ dst_height ]
-	trans_skip_line:
-		dec	[ counter_y ]
-		mov	[ dy_acc ] , ebx
-		jnz	trans_outter_loop
-		jmp	all_done	//ret
-
-
-	; *************************************************************************
-	; normal scale with remap
-
-	trans_remap:
-   	    mov	ecx , ebx
-   	    mov	[ dx_frac ], eax
-   	    and	ecx , 01fh
-   	    mov	eax , [ remap ]
-   	    shr	ebx , 5
-   	    imul	ecx , - 17
-   	    mov	[ counter_x ] , ebx
-   	    lea	ecx , [ trans_remapref_point + ecx ]
-   	    mov	[ entry ] , ecx
-
- 	trans_remapoutter_loop:
-   	    mov	ebx , [ counter_x ]
-   	    push	esi
-   	    mov	[ remap_counter ] , ebx
-   	    push	edi
-   	    xor	ecx , ecx
-   	    xor	ebx , ebx
-   	    jmp	[ entry ]
- 	
-	
-	trans_remapinner_loop:
-   	    // REPT not supported for inline asm. ST - 12/19/2018 6:11PM
-			 //REPT	32
-			 // Run out of registers so use ebp
-			 	push ebp		//ST - 12/19/2018 6:11PM
-				mov ebp,32	//ST - 12/19/2018 6:11PM
-rept_loop3:
-		       mov	bl , [ esi ]
-		       test	bl , bl
-		       jz	trans_pixel2
-		       mov	cl , [ eax + ebx ]
-		       mov	[ edi ] , cl
-		  trans_pixel2:
-		       add	ecx , [ dx_frac ]
-		       adc	esi , edx
-		       inc	edi
-				
-				dec ebp				//ST - 12/19/2018 6:11PM
-				jnz rept_loop3		//ST - 12/19/2018 6:11PM
-				pop ebp				//ST - 12/19/2018 6:11PM
-
-   	    //ENDM
-
- 	trans_remapref_point:
-   	    dec	[ remap_counter ]
-   	    jge	trans_remapinner_loop
-
-   	    pop	edi
-   	    pop	esi
-   	    add	edi , [ dst_win_width ]
-   	    add	esi , [ dy_intr ]
-
-   	    mov	ebx , [ dy_acc ]
-   	    add	ebx , [ dy_frac ]
-   	    jle	trans_remapskip_line
-   	    add	esi , [ src_win_width ]
-   	    sub	ebx , [ dst_height ]
-	trans_remapskip_line:
-		dec	[ counter_y ]
-		mov	[ dy_acc ] , ebx
-		jnz	trans_remapoutter_loop
-		//ret
-
-
-	all_done:
+	// Clip Source Rectangle against source Window boundaries.
+	win_w = GVP_Width(this_object);
+	win_h = GVP_Height(this_object);
+	code0 = WW_Clip_Code(src_x0, src_y0, win_w, win_h);
+	code1 = WW_Clip_Code(src_x1, src_y1, win_w, win_h);
+	if (code0 & code1) return TRUE;
+	if (code0 | code1) {
+		if (code0 & 8) {
+			src_x0 = 0;
+			dst_x0 = WW_Add(WW_Mul_Div(WW_Neg(src_x), dst_width, src_width), dst_x);
+		}
+		if (code0 & 2) {
+			src_y0 = 0;
+			dst_y0 = WW_Add(WW_Mul_Div(WW_Neg(src_y), dst_height, src_height), dst_y);
+		}
+		if (code1 & 4) {
+			src_x1 = win_w;
+			dst_x1 = WW_Add(WW_Mul_Div(WW_Sub(win_w, src_x), dst_width, src_width), dst_x);
+		}
+		if (code1 & 1) {
+			src_y1 = win_h;
+			dst_y1 = WW_Add(WW_Mul_Div(WW_Sub(win_h, src_y), dst_height, src_height), dst_y);
+		}
 	}
+
+	// Clip destination Rectangle against destination Window boundaries.
+	win_w = GVP_Width(dest);
+	win_h = GVP_Height(dest);
+	code0 = WW_Clip_Code(dst_x0, dst_y0, win_w, win_h);
+	code1 = WW_Clip_Code(dst_x1, dst_y1, win_w, win_h);
+	if (code0 & code1) return TRUE;
+	if (code0 | code1) {
+		if (code0 & 8) {
+			dst_x0 = 0;
+			src_x0 = WW_Add(WW_Mul_Div(WW_Neg(dst_x), src_width, dst_width), src_x);
+		}
+		if (code0 & 2) {
+			dst_y0 = 0;
+			src_y0 = WW_Add(WW_Mul_Div(WW_Neg(dst_y), src_height, dst_height), src_y);
+		}
+		if (code1 & 4) {
+			dst_x1 = win_w;
+			src_x1 = WW_Add(WW_Mul_Div(WW_Sub(win_w, dst_x), src_width, dst_width), src_x);
+		}
+		if (code1 & 1) {
+			dst_y1 = win_h;
+			src_y1 = WW_Add(WW_Mul_Div(WW_Sub(win_h, dst_y), src_height, dst_height), src_y);
+		}
+	}
+	(void)src_x1;		// (computed but never used, as in the asm)
+	(void)src_y1;
+
+	// do_scaling:
+	src_win_width = GVP_Stride(this_object);
+	unsigned char const *src = GVP_Base(this_object) + WW_Mul(src_win_width, src_y0) + src_x0;
+
+	dst_win_width = GVP_Stride(dest);
+	unsigned char *dst = GVP_Base(dest) + WW_Mul(dst_win_width, dst_y0) + dst_x0;
+
+	// Vertical step: src_height / dst_height (edx:eax with edx = 0).
+	{
+		int64_t num = (int64_t)(uint32_t)src_height;
+		dy_intr = WW_Mul((int)(uint32_t)(num / dst_height), src_win_width);
+		dy_frac = (int)(num % dst_height);
+		dy_acc = WW_Neg(dst_height);
+	}
+
+	// Horizontal step: (src_width << 16) / dst_width as 16.16 fixed point;
+	// the fraction is kept in the top 16 bits so its carry steps the source.
+	{
+		int64_t num = (int64_t)(uint32_t)((unsigned)src_width << 16);
+		uint32_t q = (uint32_t)(num / dst_width);
+		dx_intr = q >> 16;
+		dx_frac = q << 16;
+	}
+
+	if (dst_y1 <= dst_y0) return TRUE;
+	counter_y = WW_Sub(dst_y1, dst_y0);
+	if (dst_x1 <= dst_x0) return TRUE;
+	counter_x = WW_Sub(dst_x1, dst_x0);
+
+	unsigned char const *table = (unsigned char const *)remap;
+	int mode = (trans != 0 ? 2 : 0) | (remap != 0 ? 1 : 0);
+
+	do {
+		unsigned char const *s = src;
+		unsigned char *d = dst;
+		uint32_t acc = 0;
+		uint32_t old_acc;
+		unsigned char pixel;
+		int i;
+
+		switch (mode) {
+			case 0:		// normal scale
+				for (i = counter_x; i > 0; i--) {
+					*d++ = *s;
+					old_acc = acc;
+					acc += dx_frac;
+					s += dx_intr + (acc < old_acc ? 1 : 0);
+				}
+				break;
+
+			case 1:		// normal scale with remap
+				for (i = counter_x; i > 0; i--) {
+					*d++ = table[*s];
+					old_acc = acc;
+					acc += dx_frac;
+					s += dx_intr + (acc < old_acc ? 1 : 0);
+				}
+				break;
+
+			case 2:		// normal scale with transparency
+				for (i = counter_x; i > 0; i--) {
+					pixel = *s;
+					if (pixel) *d = pixel;
+					d++;
+					old_acc = acc;
+					acc += dx_frac;
+					s += dx_intr + (acc < old_acc ? 1 : 0);
+				}
+				break;
+
+			default:	// transparency (checked before the remap) with remap
+				for (i = counter_x; i > 0; i--) {
+					pixel = *s;
+					if (pixel) *d = table[pixel];
+					d++;
+					old_acc = acc;
+					acc += dx_frac;
+					s += dx_intr + (acc < old_acc ? 1 : 0);
+				}
+				break;
+		}
+
+		dst += dst_win_width;
+		src += dy_intr;
+
+		int64_t sum = (int64_t)dy_acc + (int64_t)dy_frac;
+		int next_acc = WW_Add(dy_acc, dy_frac);
+		if (sum > 0) {
+			src += src_win_width;
+			next_acc = WW_Sub(next_acc, dst_height);
+		}
+		dy_acc = next_acc;
+	} while (--counter_y != 0);
+
+	return TRUE;
 }
 
 
@@ -2687,55 +1646,36 @@ GLOBAL C	Buffer_Draw_Stamp_Clip:near
 extern "C" void __cdecl Init_Stamps(unsigned int icondata)
 {
 
-	__asm {
-		pushad										// ST - 12/20/2018 10:30AM
-		
-		; Verify legality of parameter.
-		cmp	[icondata],0
-		je	short fini
+	// webcandc: C++ port of the original x86 routine
+	// Verify legality of parameter.
+	if (icondata == 0) return;
 
-		; Don't initialize if already initialized to this set (speed reasons).
-		mov	edi,[icondata]
-		cmp	[LastIconset],edi
-		je	short fini
-		mov	[LastIconset],edi
+	// Don't initialize if already initialized to this set (speed reasons).
+	if (LastIconset == icondata) return;
+	LastIconset = icondata;
 
-		; Record number of icons in set.
-		movzx	eax,[edi]IControl_Type.Count
-		mov	[IconCount],eax
+	IControl_Type const *control = (IControl_Type const *)(uintptr_t)icondata;
 
-		; Record width of icon.
-		movzx	eax,[edi]IControl_Type.Width
-		mov	[IconWidth],eax
+	// Record number of icons in set.
+	IconCount = (unsigned short)control->Count;
 
-		; Record height of icon.
-		movzx	ebx,[edi]IControl_Type.Height
-		mov	[IconHeight],ebx
+	// Record width of icon.
+	IconWidth = (unsigned short)control->Width;
 
-		; Record size of icon (in bytes).
-		mul	ebx
-		mov	[IconSize],eax
+	// Record height of icon.
+	IconHeight = (unsigned short)control->Height;
 
-		; Record hard pointer to icon map data.
-		mov	eax,[edi]IControl_Type.Map
-		add	eax,edi
-		mov	[MapPtr],eax
+	// Record size of icon (in bytes).
+	IconSize = IconWidth * IconHeight;
 
-//nomap:
-		; Record hard pointer to icon data.
-		mov	eax,edi
-		add	eax,[edi]IControl_Type.Icons
-		mov	[StampPtr],eax
+	// Record hard pointer to icon map data (always set, as in the asm).
+	MapPtr = icondata + (unsigned int)(uintptr_t)control->Map;
 
-		; Record the transparent table.
-		mov	eax,edi
-		add	eax,[edi]IControl_Type.TransFlag
-		mov	[IsTrans],eax
+	// Record hard pointer to icon data.
+	StampPtr = icondata + (unsigned int)(uintptr_t)control->Icons;
 
-fini:
-		popad										// ST - 12/20/2018 10:30AM
-
-	}
+	// Record the transparent table.
+	IsTrans = icondata + (unsigned int)(uintptr_t)control->TransFlag;
 }
 
 
@@ -2778,167 +1718,82 @@ void __cdecl Buffer_Draw_Stamp(void const *this_object, void const *icondata, in
 		LOCAL	doremap:BYTE		; Should remapping occur?
 */
 		
-	__asm {
+	// webcandc: C++ port of the original x86 routine
+	if (icondata == 0) return;
 
-			pushad
-			cmp	[icondata],0
-			je	proc_out
+	// Initialize the stamp data if necessary.
+	if (LastIconset != (unsigned int)(uintptr_t)icondata) {
+		Init_Stamps((unsigned int)(uintptr_t)icondata);
+	}
 
-			; Initialize the stamp data if necessary.
-			mov	eax,[icondata]
-			cmp	[LastIconset],eax
-			je		short noreset
-			push	eax
-			call	Init_Stamps
-			pop	eax			             // Clean up stack. ST - 12/20/2018 10:42AM
-noreset:
+	// Determine if the icon number requested is actually in the set.
+	// Perform the logical icon to actual icon number remap if necessary
+	// (only the low byte is replaced: mov bl,[edi+ebx]).
+	unsigned int icon_num = (unsigned int)icon;
+	if (MapPtr != 0) {
+		icon_num = (icon_num & ~0xFFu) | ((unsigned char const *)(uintptr_t)MapPtr)[icon_num];
+	}
+	if (icon_num >= IconCount) return;
+	icon = (int)icon_num;			// Updated icon number.
 
-			; Determine if the icon number requested is actually in the set.
-			; Perform the logical icon to actual icon number remap if necessary.
-			mov	ebx,[icon]
-			cmp	[MapPtr],0
-			je	short notmap
-			mov	edi,[MapPtr]
-			mov	bl,[edi+ebx]
-notmap:
-			cmp	ebx,[IconCount]
-			jae	proc_out
-			mov	[icon],ebx		; Updated icon number.
+	// If the remap table pointer passed in is NULL, then flag this condition
+	// so that the faster (non-remapping) icon draw loop will be used.
+	doremap = (remap != 0);
 
-			; If the remap table pointer passed in is NULL, then flag this condition
-			; so that the faster (non-remapping) icon draw loop will be used.
-			cmp	[remap],0
-			setne	[doremap]
+	// Get pointer to position to render icon.
+	int stride = GVP_Stride(this_object);
+	unsigned char *dst = GVP_Base(this_object) + WW_Mul(stride, y_pixel) + x_pixel;
 
-			; Get pointer to position to render icon. EDI = ptr to destination page.
-			mov	ebx,[this_object]
-			mov	edi,[ebx]GraphicViewPortClass.Offset
-			mov	eax,[ebx]GraphicViewPortClass.Width
-			add	eax,[ebx]GraphicViewPortClass.XAdd
-			add	eax,[ebx]GraphicViewPortClass.Pitch
-			push	eax			; save viewport full width for lower
-			mul	[y_pixel]
-			add	edi,eax
-			add	edi,[x_pixel]
+	// Determine row modulo for advancing to next line.
+	modulo = (unsigned int)stride - IconWidth;
 
-			; Determine row modulo for advancing to next line.
-			pop	eax			; retrieve viewport width
-			sub	eax,[IconWidth]
-			mov	[modulo],eax
+	// Setup some working variables.
+	unsigned int rows = IconHeight;		// Row counter.
+	iwidth = IconWidth;
 
-			; Setup some working variables.
-			mov	ecx,[IconHeight]	; Row counter.
-			mov	eax,[IconWidth]
-			mov	[iwidth],eax		; Stack copy of byte width for easy BP access.
+	// Fetch pointer to start of icon's data.
+	unsigned char const *src = (unsigned char const *)(uintptr_t)(StampPtr + icon_num * IconSize);
+	unsigned char pixel;
+	unsigned int i;
 
-			; Fetch pointer to start of icon's data.  ESI = ptr to icon data.
-			mov	eax,[icon]
-			mul	[IconSize]
-			mov	esi,[StampPtr]
-			add	esi,eax
+	if (doremap) {
+		// Complex icon draw -- extended remap.
+		unsigned char const *xlat = (unsigned char const *)remap;
+		for (; rows; rows--) {
+			for (i = iwidth; i; i--) {
+				pixel = xlat[*src++];		// New real color to draw.
+				if (pixel) *dst = pixel;	// Transparency skip check.
+				dst++;
+			}
+			dst += (int)modulo;
+		}
+		return;
+	}
 
-			; Determine whether simple icon draw is sufficient or whether the
-			; extra remapping icon draw is needed.
-			cmp	[BYTE PTR doremap],0
-			je	short istranscheck
+	// Check to see if transparent or generic draw is necessary.
+	if (((unsigned char const *)(uintptr_t)IsTrans)[icon_num] == 0) {
+		// Fast non-transparent icon draw routine (4 rows of whole dwords per pass).
+		unsigned int blocks = rows >> 2;
+		unsigned int bytes = (iwidth >> 2) * 4;
+		for (; blocks; blocks--) {
+			for (i = 0; i < 4; i++) {
+				memcpy(dst, src, bytes);
+				src += bytes;
+				dst += bytes;
+				dst += (int)modulo;
+			}
+		}
+		return;
+	}
 
-			;************************************************************
-			; Complex icon draw -- extended remap.
-			; EBX = Palette pointer (ready for XLAT instruction).
-			; EDI = Pointer to icon destination in page.
-			; ESI = Pointer to icon data.
-			; ECX = Number of pixel rows.
-		;;;	mov	edx,[remap]
-		 mov ebx,[remap]
-			xor	eax,eax
-xrowloop:
-			push	ecx
-			mov	ecx,[iwidth]
-
-xcolumnloop:
-			lodsb
-		;;;	mov	ebx,edx
-		;;;	add	ebx,eax
-		;;;	mov	al,[ebx]		; New real color to draw.
-		 xlatb
-			or	al,al
-			jz	short xskip1		; Transparency skip check.
-			mov	[edi],al
-xskip1:
-			inc	edi
-			loop	xcolumnloop
-
-			pop	ecx
-			add	edi,[modulo]
-			loop	xrowloop
-			jmp	short proc_out
-
-
-			;************************************************************
-			; Check to see if transparent or generic draw is necessary.
-istranscheck:
-			mov	ebx,[IsTrans]
-			add	ebx,[icon]
-			cmp	[BYTE PTR ebx],0
-			jne	short rowloop
-
-			;************************************************************
-			; Fast non-transparent icon draw routine.
-			; ES:DI = Pointer to icon destination in page.
-			; DS:SI = Pointer to icon data.
-			; CX = Number of pixel rows.
-			mov	ebx,ecx
-			shr	ebx,2
-			mov	edx,[modulo]
-			mov	eax,[iwidth]
-			shr	eax,2
-loop1:
-			mov	ecx,eax
-			rep movsd
-			add	edi,edx
-
-			mov	ecx,eax
-			rep movsd
-			add	edi,edx
-
-			mov	ecx,eax
-			rep movsd
-			add	edi,edx
-
-			mov	ecx,eax
-			rep movsd
-			add	edi,edx
-
-			dec	ebx
-			jnz	loop1
-			jmp	short proc_out
-
-			;************************************************************
-			; Transparent icon draw routine -- no extended remap.
-			; ES:DI = Pointer to icon destination in page.
-			; DS:SI = Pointer to icon data.
-			; CX = Number of pixel rows.
-rowloop:
-			push	ecx
-			mov	ecx,[iwidth]
-
-columnloop:
-			lodsb
-			or	al,al
-			jz	short skip1		; Transparency check.
-			mov	[edi],al
-skip1:
-			inc	edi
-			loop	columnloop
-
-			pop	ecx
-			add	edi,[modulo]
-			loop	rowloop
-
-			; Cleanup and exit icon drawing routine.
-proc_out:
-			popad
-			//ret
+	// Transparent icon draw routine -- no extended remap.
+	for (; rows; rows--) {
+		for (i = iwidth; i; i--) {
+			pixel = *src++;
+			if (pixel) *dst = pixel;		// Transparency check.
+			dst++;
+		}
+		dst += (int)modulo;
 	}
 }
 
@@ -2986,261 +1841,129 @@ void __cdecl Buffer_Draw_Stamp_Clip(void const *this_object, void const *icondat
 	LOCAL	skip:DWORD		; amount to skip per row of icon data
 	LOCAL	doremap:BYTE		; Should remapping occur?
 */
-	__asm {
-			pushad
-			cmp	[icondata],0
-			je	proc_out
+	// webcandc: C++ port of the original x86 routine
+	if (icondata == 0) return;
 
-			; Initialize the stamp data if necessary.
-			mov	eax,[icondata]
-			cmp	[LastIconset],eax
-			je		short noreset2
-			push	eax
-			call	Init_Stamps
-			pop	eax			             // Clean up stack. ST - 12/20/2018 10:42AM
-noreset2:
+	// Initialize the stamp data if necessary.
+	if (LastIconset != (unsigned int)(uintptr_t)icondata) {
+		Init_Stamps((unsigned int)(uintptr_t)icondata);
+	}
 
-			; Determine if the icon number requested is actually in the set.
-			; Perform the logical icon to actual icon number remap if necessary.
-			mov	ebx,[icon]
-			cmp	[MapPtr],0
-			je	short notmap2
-			mov	edi,[MapPtr]
-			mov	bl,[edi+ebx]
-notmap2:
-			cmp	ebx,[IconCount]
-			jae	proc_out
-			mov	[icon],ebx		; Updated icon number.
+	// Determine if the icon number requested is actually in the set.
+	// Perform the logical icon to actual icon number remap if necessary
+	// (only the low byte is replaced: mov bl,[edi+ebx]).
+	unsigned int icon_num = (unsigned int)icon;
+	if (MapPtr != 0) {
+		icon_num = (icon_num & ~0xFFu) | ((unsigned char const *)(uintptr_t)MapPtr)[icon_num];
+	}
+	if (icon_num >= IconCount) return;
+	icon = (int)icon_num;			// Updated icon number.
 
-			; Setup some working variables.
-			mov	ecx,[IconHeight]	; Row counter.
-			mov	eax,[IconWidth]
-			mov	[iwidth],eax		; Stack copy of byte width for easy BP access.
+	// Setup some working variables.
+	int rows = (int)IconHeight;		// Row counter.
+	iwidth = IconWidth;
 
-			; Fetch pointer to start of icon's data.  ESI = ptr to icon data.
-			mov	eax,[icon]
-			mul	[IconSize]
-			mov	esi,[StampPtr]
-			add	esi,eax
+	// Fetch pointer to start of icon's data.
+	unsigned char const *src = (unsigned char const *)(uintptr_t)(StampPtr + icon_num * IconSize);
 
-			; Update the clipping window coordinates to be valid maxes instead of width & height
-			; , and change the coordinates to be window-relative
-			mov	ebx,[min_x]
-			add	[max_x],ebx
-			add	[x_pixel],ebx		; make it window-relative
-			mov	ebx,[min_y]
-			add	[max_y],ebx
-			add	[y_pixel],ebx		; make it window-relative
+	// Update the clipping window coordinates to be valid maxes instead of width & height
+	// , and change the coordinates to be window-relative
+	max_x = WW_Add(max_x, min_x);
+	x_pixel = WW_Add(x_pixel, min_x);
+	max_y = WW_Add(max_y, min_y);
+	y_pixel = WW_Add(y_pixel, min_y);
 
-			; See if the icon is within the clipping window
-			; First, verify that the icon position is less than the maximums
-			mov	ebx,[x_pixel]
-			cmp	ebx,[max_x]
-			jge	proc_out
-			mov	ebx,[y_pixel]
-			cmp	ebx,[max_y]
-			jge	proc_out
-			; Now verify that the icon position is >= the minimums
-			add	ebx,[IconHeight]
-			cmp	ebx,[min_y]
-			jle	proc_out
-			mov	ebx,[x_pixel]
-			add	ebx,[IconWidth]
-			cmp	ebx,[min_x]
-			jle	proc_out
+	// See if the icon is within the clipping window
+	// First, verify that the icon position is less than the maximums
+	if (x_pixel >= max_x) return;
+	if (y_pixel >= max_y) return;
+	// Now verify that the icon position is >= the minimums
+	if (WW_Add(y_pixel, (int)IconHeight) <= min_y) return;
+	if (WW_Add(x_pixel, (int)IconWidth) <= min_x) return;
 
-			; Now, clip the x, y, width, and height variables to be within the
-			; clipping rectangle
-			mov	ebx,[x_pixel]
-			cmp	ebx,[min_x]
-			jge	nominxclip
-			; x < minx, so must clip
-			mov	ebx,[min_x]
-			sub	ebx,[x_pixel]
-			add	esi,ebx		; source ptr += (minx - x)
-			sub	[iwidth],ebx	; icon width -= (minx - x)
-			mov	ebx,[min_x]
-			mov	[x_pixel],ebx
+	// Now, clip the x, y, width, and height variables to be within the
+	// clipping rectangle
+	if (x_pixel < min_x) {
+		// x < minx, so must clip
+		int delta = WW_Sub(min_x, x_pixel);
+		src += delta;						// source ptr += (minx - x)
+		iwidth -= (unsigned int)delta;		// icon width -= (minx - x)
+		x_pixel = min_x;
+	}
+	skip = IconWidth - iwidth;
 
-nominxclip:
-			mov	eax,[IconWidth]
-			sub	eax,[iwidth]
-			mov	[skip],eax
+	// Check for x+width > max_x
+	if (WW_Add(x_pixel, (int)iwidth) > max_x) {
+		// x+width is greater than max_x, so must clip width down
+		unsigned int old_width = iwidth;
+		iwidth = (unsigned int)WW_Sub(max_x, x_pixel);	// iwidth = max_x - xpixel
+		skip += old_width - iwidth;						// skip += (old width - iwidth)
+	}
 
-			; Check for x+width > max_x
-			mov	eax,[x_pixel]
-			add	eax,[iwidth]
-			cmp	eax,[max_x]
-			jle	nomaxxclip
-			; x+width is greater than max_x, so must clip width down
-			mov	eax,[iwidth]	; eax = old width
-			mov	ebx,[max_x]
-			sub	ebx,[x_pixel]
-			mov	[iwidth],ebx	; iwidth = max_x - xpixel
-			sub	eax,ebx
-			add	[skip],eax	; skip += (old width - iwidth)
-nomaxxclip:
-			; check if y < miny
-			mov	eax,[min_y]
-			cmp	eax,[y_pixel]	; if(miny <= y_pixel), no clip needed
-			jle	nominyclip
-			sub	eax,[y_pixel]
-			sub	ecx,eax		; height -= (miny - y)
-			mul	[IconWidth]
-			add	esi,eax		; icon source ptr += (width * (miny - y))
-			mov	eax,[min_y]
-			mov	[y_pixel],eax	; y = miny
-nominyclip:
-			; check if (y+height) > max y
-			mov	eax,[y_pixel]
-			add	eax,ecx
-			cmp	eax,[max_y]	; if (y + height <= max_y), no clip needed
-			jle	nomaxyclip
-			mov	ecx,[max_y]	; height = max_y - y_pixel
-			sub	ecx,[y_pixel]
-nomaxyclip:
+	// check if y < miny
+	if (!(min_y <= y_pixel)) {
+		int delta = WW_Sub(min_y, y_pixel);
+		rows = WW_Sub(rows, delta);					// height -= (miny - y)
+		src += (unsigned int)delta * IconWidth;	// icon source ptr += (width * (miny - y))
+		y_pixel = min_y;
+	}
 
-			; If the remap table pointer passed in is NULL, then flag this condition
-			; so that the faster (non-remapping) icon draw loop will be used.
-			cmp	[remap],0
-			setne	[doremap]
+	// check if (y+height) > max y
+	if (WW_Add(y_pixel, rows) > max_y) {
+		rows = WW_Sub(max_y, y_pixel);				// height = max_y - y_pixel
+	}
 
-			; Get pointer to position to render icon. EDI = ptr to destination page.
-			mov	ebx,[this_object]
-			mov	edi,[ebx]GraphicViewPortClass.Offset
-			mov	eax,[ebx]GraphicViewPortClass.Width
-			add	eax,[ebx]GraphicViewPortClass.XAdd
-			add	eax,[ebx]GraphicViewPortClass.Pitch
-			push	eax			; save viewport full width for lower
-			mul	[y_pixel]
-			add	edi,eax
-			add	edi,[x_pixel]
+	// If the remap table pointer passed in is NULL, then flag this condition
+	// so that the faster (non-remapping) icon draw loop will be used.
+	doremap = (remap != 0);
 
-			; Determine row modulo for advancing to next line.
-			pop	eax			; retrieve viewport width
-			sub	eax,[iwidth]
-			mov	[modulo],eax
+	// Get pointer to position to render icon.
+	int stride = GVP_Stride(this_object);
+	unsigned char *dst = GVP_Base(this_object) + WW_Mul(stride, y_pixel) + x_pixel;
 
-			; Determine whether simple icon draw is sufficient or whether the
-			; extra remapping icon draw is needed.
-			cmp	[BYTE PTR doremap],0
-			je	short istranscheck2
+	// Determine row modulo for advancing to next line.
+	modulo = (unsigned int)stride - iwidth;
 
-			;************************************************************
-			; Complex icon draw -- extended remap.
-			; EBX = Palette pointer (ready for XLAT instruction).
-			; EDI = Pointer to icon destination in page.
-			; ESI = Pointer to icon data.
-			; ECX = Number of pixel rows.
-			mov	ebx,[remap]
-			xor	eax,eax
-xrowloopc:
-			push	ecx
-			mov	ecx,[iwidth]
+	unsigned char pixel;
+	unsigned int i;
 
-xcolumnloopc:
-			lodsb
-			xlatb
-			or	al,al
-			jz	short xskip1c		; Transparency skip check.
-			mov	[edi],al
-xskip1c:
-			inc	edi
-			loop	xcolumnloopc
+	if (doremap) {
+		// Complex icon draw -- extended remap.
+		unsigned char const *xlat = (unsigned char const *)remap;
+		for (; rows > 0; rows--) {
+			for (i = iwidth; i; i--) {
+				pixel = xlat[*src++];
+				if (pixel) *dst = pixel;		// Transparency skip check.
+				dst++;
+			}
+			dst += (int)modulo;
+			src += (int)skip;
+		}
+		return;
+	}
 
-			pop	ecx
-			add	edi,[modulo]
- 		add esi,[skip]
-			loop	xrowloopc
-			jmp	short proc_out
+	// Check to see if transparent or generic draw is necessary.
+	if (((unsigned char const *)(uintptr_t)IsTrans)[icon_num] == 0) {
+		// Fast non-transparent icon draw routine.
+		for (; rows > 0; rows--) {
+			memcpy(dst, src, iwidth);
+			dst += iwidth;
+			src += iwidth;
+			dst += (int)modulo;
+			src += (int)skip;
+		}
+		return;
+	}
 
-
-			;************************************************************
-			; Check to see if transparent or generic draw is necessary.
-istranscheck2:
-			mov	ebx,[IsTrans]
-			add	ebx,[icon]
-			cmp	[BYTE PTR ebx],0
-			jne	short rowloopc
-
-			;************************************************************
-			; Fast non-transparent icon draw routine.
-			; ES:DI = Pointer to icon destination in page.
-			; DS:SI = Pointer to icon data.
-			; CX = Number of pixel rows.
-			mov	ebx,ecx
-			mov	edx,[modulo]
-			mov	eax,[iwidth]
-
-			;
-			; Optimise copy by dword aligning the destination
-			;
-loop1c:
-			push	eax
- 		//rept 3					// No rept in inline asm. ST - 12/20/2018 10:43AM
-			test	edi,3
-			jz	aligned
-			movsb
-			dec	eax
-			jz	finishedit
-
-			test	edi,3
-			jz	aligned
-			movsb
-			dec	eax
-			jz	finishedit
-
-			test	edi,3
-			jz	aligned
-			movsb
-			dec	eax
-			jz	finishedit
-
- 		//endm
-aligned:
-			mov	ecx,eax
-			shr	ecx,2
-			rep	movsd
-			mov	ecx,eax
-			and	ecx,3
-			rep	movsb
-
-finishedit:
-			add	edi,edx
-			add	esi,[skip]
-			pop	eax
-
-			dec	ebx
-			jnz	loop1c
-			jmp	short proc_out
-
-			;************************************************************
-			; Transparent icon draw routine -- no extended remap.
-			; ES:DI = Pointer to icon destination in page.
-			; DS:SI = Pointer to icon data.
-			; CX = Number of pixel rows.
-rowloopc:
-			push	ecx
-			mov	ecx,[iwidth]
-
-columnloopc:
-			lodsb
-			or	al,al
-			jz	short skip1c		; Transparency check.
-			mov	[edi],al
-skip1c:
-			inc	edi
-			loop	columnloopc
-
-			pop	ecx
-			add	edi,[modulo]
- 		add esi,[skip]
-			loop	rowloopc
-
-			; Cleanup and exit icon drawing routine.
-proc_out:
-			popad
-			//ret
+	// Transparent icon draw routine -- no extended remap.
+	for (; rows > 0; rows--) {
+		for (i = iwidth; i; i--) {
+			pixel = *src++;
+			if (pixel) *dst = pixel;			// Transparency check.
+			dst++;
+		}
+		dst += (int)modulo;
+		src += (int)skip;
 	}
 }
 
@@ -3314,121 +2037,52 @@ VOID __cdecl Buffer_Remap(void * this_object, int sx, int sy, int width, int hei
 	local	counter_x : dword
 */
 
-	unsigned int x0_pixel = (unsigned int) sx;
-	unsigned int y0_pixel = (unsigned int) sy;
-	unsigned int region_width = (unsigned int) width;
-	unsigned int region_height = (unsigned int) height;
+	// webcandc: C++ port of the original x86 routine
+	int x0_pixel = sx;
+	int y0_pixel = sy;
+	int x1_pixel;
+	int y1_pixel;
+	int win_width;
+	int counter_x;
+	unsigned code0;
+	unsigned code1;
 
-	unsigned int x1_pixel = 0;
-	unsigned int y1_pixel = 0;
-	unsigned int win_width = 0;
-	unsigned int counter_x = 0;
+	if (remap == 0) return;
 
-	__asm {
-		
-		cmp	[ remap ] , 0
-		jz		real_out
-
-	; Clip Source Rectangle against source Window boundaries.
-		mov  	esi , [ this_object ]	    ; get ptr to src
-		xor 	ecx , ecx
-		xor 	edx , edx
-		mov	edi , [esi]GraphicViewPortClass.Width  ; get width into register
-		mov	ebx , [ x0_pixel ]
-		mov	eax , [ x0_pixel ]
-		add	ebx , [ region_width ]
-		shld	ecx , eax , 1
-		mov	[ x1_pixel ] , ebx
-		inc	edi
-		shld	edx , ebx , 1
-		sub	eax , edi
-		sub	ebx , edi
-		shld	ecx , eax , 1
-		shld	edx , ebx , 1
-
-		mov	edi,[esi]GraphicViewPortClass.Height ; get height into register
-		mov	ebx , [ y0_pixel ]
-		mov	eax , [ y0_pixel ]
-		add	ebx , [ region_height ]
-		shld	ecx , eax , 1
-		mov	[ y1_pixel ] , ebx
-		inc	edi
-		shld	edx , ebx , 1
-		sub	eax , edi
-		sub	ebx , edi
-		shld	ecx , eax , 1
-		shld	edx , ebx , 1
-
-		xor	cl , 5
-		xor	dl , 5
-		mov	al , cl
-		test	dl , cl
-		jnz	real_out
-		or	al , dl
-		jz		do_remap
-
-		test	cl , 1000b
-		jz		scr_left_ok
-		mov	[ x0_pixel ] , 0
-
-scr_left_ok:
-		test	cl , 0010b
-		jz		scr_bottom_ok
-		mov	[ y0_pixel ] , 0
-
-scr_bottom_ok:
-		test	dl , 0100b
-		jz		scr_right_ok
-		mov	eax , [esi]GraphicViewPortClass.Width  ; get width into register
-		mov	[ x1_pixel ] , eax
-scr_right_ok:
-		test	dl , 0001b
-		jz		do_remap
-		mov	eax , [esi]GraphicViewPortClass.Height  ; get width into register
-		mov	[ y1_pixel ] , eax
-
-
-do_remap:
-      	 cld
-      	 mov	edi , [esi]GraphicViewPortClass.Offset
-      	 mov	eax , [esi]GraphicViewPortClass.XAdd
-      	 mov	ebx , [ x1_pixel ]
-      	 add	eax , [esi]GraphicViewPortClass.Width
-      	 add	eax , [esi]GraphicViewPortClass.Pitch
-      	 mov	esi , eax
-      	 mul	[ y0_pixel ]
-      	 add	edi , [ x0_pixel ]
-      	 sub	ebx , [ x0_pixel ]
-      	 jle	real_out
-      	 add	edi , eax
-      	 sub	esi , ebx
-
-      	 mov	ecx , [ y1_pixel ]
-      	 sub	ecx , [ y0_pixel ]
-      	 jle	real_out
-      	 mov	eax , [ remap ]
-      	 mov	[ counter_x ] , ebx
-      	 xor	edx , edx
-
-outer_loop:
-      	 mov	ebx , [ counter_x ]
-inner_loop:
-      	 mov	dl , [ edi ]
-      	 mov	dl , [ eax + edx ]
-      	 mov	[ edi ] , dl
-      	 inc	edi
-      	 dec	ebx
-      	 jnz	inner_loop
-      	 add	edi , esi
-      	 dec	ecx
-      	 jnz	outer_loop
-
-
-
-
-real_out:
-//		ret
+	// Clip Source Rectangle against source Window boundaries.
+	int vp_width = GVP_Width(this_object);
+	int vp_height = GVP_Height(this_object);
+	x1_pixel = WW_Add(x0_pixel, width);
+	y1_pixel = WW_Add(y0_pixel, height);
+	code0 = WW_Clip_Code(x0_pixel, y0_pixel, vp_width, vp_height);
+	code1 = WW_Clip_Code(x1_pixel, y1_pixel, vp_width, vp_height);
+	if (code0 & code1) return;
+	if (code0 | code1) {
+		if (code0 & 8) x0_pixel = 0;
+		if (code0 & 2) y0_pixel = 0;
+		if (code1 & 4) x1_pixel = vp_width;
+		if (code1 & 1) y1_pixel = vp_height;
 	}
+
+	// do_remap:
+	win_width = GVP_Stride(this_object);
+	unsigned char *dst = GVP_Base(this_object) + WW_Mul(win_width, y0_pixel) + x0_pixel;
+	if (x1_pixel <= x0_pixel) return;
+	counter_x = WW_Sub(x1_pixel, x0_pixel);
+	win_width = WW_Sub(win_width, counter_x);
+
+	if (y1_pixel <= y0_pixel) return;
+	int rows = WW_Sub(y1_pixel, y0_pixel);
+	unsigned char const *table = (unsigned char const *)remap;
+
+	do {
+		int i = counter_x;
+		do {
+			*dst = table[*dst];
+			dst++;
+		} while (--i != 0);
+		dst += win_width;
+	} while (--rows != 0);
 }
 
 
@@ -3531,103 +2185,54 @@ PROC	Apply_XOR_Delta C near
 	ARG	delta:DWORD		; pointers.
 */
 	
-	__asm {
-		
-			; Optimized for 486/pentium by rearanging instructions.
-			mov	edi,[target]		; get our pointers into offset registers.
-			mov	esi,[delta]
+	// webcandc: C++ port of the original x86 routine
+	unsigned char *dst = (unsigned char *)target;
+	unsigned char const *src = (unsigned char const *)delta;
+	unsigned int code;
+	unsigned int count;
+	unsigned char value;
 
-			cld				; make sure we go forward
-			xor	ecx,ecx			; use cx for loop
+	for (;;) {
+		code = *src++;					// get delta source byte
 
-		top_loop:
-			xor	eax,eax			; clear out eax.
-			mov	al,[esi]		; get delta source byte
-			inc	esi
+		if (code == 0) {
+			// SHORTRUN
+			count = *src++;				// get count
+			value = *src++;				// get XOR byte
+			for (; count; count--) *dst++ ^= value;
+			continue;
+		}
 
-			test	al,al			; check for a SHORTDUMP ; check al incase of sign value.
-			je	short_run
-			js	check_others
+		if ((code & 0x80) == 0) {
+			// SHORTDUMP
+			for (count = code; count; count--) *dst++ ^= *src++;
+			continue;
+		}
 
-		;
-		; SHORTDUMP
-		;
-			mov	ecx,eax			; stick count in cx
+		// By now, we know it must be a LONGDUMP, SHORTSKIP, LONGRUN, or LONGSKIP
+		code -= 0x80;
+		if (code == 0) {
+			code = src[0] | (src[1] << 8);	// get word code
+			src += 2;
+			if (code == 0) break;			// long count of zero means stop
+			if (code & 0x8000) {
+				code -= 0x8000;
+				if (code & 0x4000) {
+					// LONGRUN
+					value = *src++;
+					for (count = code - 0x4000; count; count--) *dst++ ^= value;
+				} else {
+					// LONGDUMP
+					for (count = code; count; count--) *dst++ ^= *src++;
+				}
+				continue;
+			}
+		}
 
-		dump_loop:
-			mov	al,[esi]		;get delta XOR byte
-			xor	[edi],al		; xor that byte on the dest
-			inc	esi
-			inc	edi
-			dec	ecx
-			jnz	dump_loop
-			jmp	top_loop
-
-		;
-		; SHORTRUN
-		;
-
-		short_run:
-			mov	cl,[esi]		; get count
-			inc	esi			; inc delta source
-
-		do_run:
-			mov	al,[esi]		; get XOR byte
-			inc	esi
-
-		run_loop:
-			xor	[edi],al		; xor that byte.
-
-			inc	edi			; go to next dest pixel
-			dec	ecx			; one less to go.
-			jnz	run_loop
-			jmp	top_loop
-
-		;
-		; By now, we know it must be a LONGDUMP, SHORTSKIP, LONGRUN, or LONGSKIP
-		;
-
-		check_others:
-			sub	eax,080h		; opcode -= 0x80
-			jnz	do_skip		; if zero then get next word, otherwise use remainder.
-
-			mov	ax,[esi]
-			lea	esi,[esi+2]		; get word code in ax
-			test	ax,ax			; set flags. (not 32bit register so neg flag works)
-			jle	not_long_skip
-
-		;
-		; SHORTSKIP AND LONGSKIP
-		;
-		do_skip:
-			add	edi,eax			; do the skip.
-			jmp	top_loop
-
-
-		not_long_skip:
-			jz	stop			; long count of zero means stop
-			sub	eax,08000h     		; opcode -= 0x8000
-			test	eax,04000h		; is it a LONGRUN (code & 0x4000)?
-			je	long_dump
-
-		;
-		; LONGRUN
-		;
-			sub	eax,04000h		; opcode -= 0x4000
-			mov	ecx,eax			; use cx as loop count
-			jmp	do_run		; jump to run code.
-
-
-		;
-		; LONGDUMP
-		;
-
-		long_dump:
-			mov	ecx,eax			; use cx as loop count
-			jmp	dump_loop		; go to the dump loop.
-
-		stop:
+		// SHORTSKIP AND LONGSKIP
+		dst += code;
 	}
+	return 0;		// eax is always zero when the stop code is reached
 }
 
 
@@ -3669,34 +2274,16 @@ void __cdecl Apply_XOR_Delta_To_Page_Or_Viewport(void *target, void *delta, int 
 	ARG	copy:DWORD		; should it be copied or xor'd?
 	*/
 	
-	__asm {
+	// webcandc: C++ port of the original x86 routine
+	XORDelta_Target = (unsigned char *)target;		// Get the target pointer.
+	XORDelta_Source = (unsigned char const *)delta;	// Get the delta pointer.
+	XORDelta_Width = (unsigned int)width;				// max column for speed compares
 
-		mov	edi,[target]		; Get the target pointer.
-		mov	esi,[delta]		; Get the destination pointer.
-
-		xor	eax,eax			; clear eax, later put them into ecx and edx.
-
-		cld				; make sure we go forward
-
-		mov	ebx,[nextrow]		; get the amount to add to get to next row from end.  push it later...
-
-		mov	ecx,eax			; use cx for loop
-		mov	edx,eax			; use dx to count the relative column.
-
-		push	ebx			; push nextrow onto the stack for Copy/XOR_Delta_Buffer.
-		mov	ebx,[width]		; bx will hold the max column for speed compares
-
-	; At this point, all the registers have been set up.  Now call the correct function
-	; to either copy or xor the data.
-
-		cmp	[copy],DO_XOR		; Do we want to copy or XOR
-		je	xorfunct		; Jump to XOR if not copy
-		call	Copy_Delta_Buffer	; Call the function to copy the delta buffer.
-		jmp	didcopy		; jump past XOR
-	xorfunct:
-		call	XOR_Delta_Buffer	; Call funtion to XOR the deltat buffer.
-	didcopy:
-		pop	ebx			; remove the push done to pass a value.
+	// Now call the correct function to either copy or xor the data.
+	if (copy == DO_XOR) {
+		XOR_Delta_Buffer(nextrow);
+	} else {
+		Copy_Delta_Buffer(nextrow);
 	}
 }
 
@@ -3730,126 +2317,8 @@ void __cdecl XOR_Delta_Buffer(int nextrow)
 	ARG	nextrow:DWORD
 	*/
 	
-	__asm {
-
-		top_loop:
-			xor	eax,eax			; clear out eax.
-			mov	al,[esi]		; get delta source byte
-			inc	esi
-
-			test	al,al			; check for a SHORTDUMP ; check al incase of sign value.
-			je	short_run
-			js	check_others
-
-		;
-		; SHORTDUMP
-		;
-			mov	ecx,eax			; stick count in cx
-
-		dump_loop:
-			mov	al,[esi]		; get delta XOR byte
-			xor	[edi],al		; xor that byte on the dest
-			inc	esi
-			inc	edx			; increment our count on current column
-			inc	edi
-			cmp	edx,ebx			; are we at the final column
-			jne	end_col1		; if not the jmp over the code
-
-			sub	edi,edx			; get our column back to the beginning.
-			xor	edx,edx			; zero out our column counter
-			add	edi,[nextrow]		; jump to start of next row
-		end_col1:
-
-			dec	ecx
-			jnz	dump_loop
-			jmp	top_loop
-
-		;
-		; SHORTRUN
-		;
-
-		short_run:
-			mov	cl,[esi]		; get count
-			inc	esi			; inc delta source
-
-		do_run:
-			mov	al,[esi]		; get XOR byte
-			inc	esi
-
-		run_loop:
-			xor	[edi],al		; xor that byte.
-
-			inc	edx			; increment our count on current column
-			inc	edi			; go to next dest pixel
-			cmp	edx,ebx			; are we at the final column
-			jne	end_col2		; if not the jmp over the code
-
-			sub	edi,ebx			; get our column back to the beginning.
-			xor	edx,edx			; zero out our column counter
-			add	edi,[nextrow]		; jump to start of next row
-		end_col2:
-
-
-			dec	ecx
-			jnz	run_loop
-			jmp	top_loop
-
-		;
-		; By now, we know it must be a LONGDUMP, SHORTSKIP, LONGRUN, or LONGSKIP
-		;
-
-		check_others:
-			sub	eax,080h		; opcode -= 0x80
-			jnz	do_skip		; if zero then get next word, otherwise use remainder.
-
-			mov	ax,[esi]		; get word code in ax
-			lea	esi,[esi+2]
-			test	ax,ax			; set flags. (not 32bit register so neg flag works)
-			jle	not_long_skip
-
-		;
-		; SHORTSKIP AND LONGSKIP
-		;
-		do_skip:
-			sub	edi,edx			; go back to beginning or row.
-			add	edx,eax			; incriment our count on current row
-		recheck3:
-			cmp	edx,ebx			; are we past the end of the row
-			jb	end_col3  		; if not the jmp over the code
-
-			sub	edx,ebx			; Subtract width from the col counter
-			add	edi,[nextrow]  		; jump to start of next row
-			jmp	recheck3		; jump up to see if we are at the right row
-		end_col3:
-			add	edi,edx			; get to correct position in row.
-			jmp	top_loop
-
-
-		not_long_skip:
-			jz	stop			; long count of zero means stop
-			sub	eax,08000h     		; opcode -= 0x8000
-			test	eax,04000h		; is it a LONGRUN (code & 0x4000)?
-			je	long_dump
-
-		;
-		; LONGRUN
-		;
-			sub	eax,04000h		; opcode -= 0x4000
-			mov	ecx,eax			; use cx as loop count
-			jmp	do_run		; jump to run code.
-
-
-		;
-		; LONGDUMP
-		;
-
-		long_dump:
-			mov	ecx,eax			; use cx as loop count
-			jmp	dump_loop		; go to the dump loop.
-
-		stop:
-
-	}
+	// webcandc: C++ port of the original x86 routine
+	WW_Delta_To_Page(nextrow, true);
 }
 
 
@@ -3881,128 +2350,8 @@ void __cdecl Copy_Delta_Buffer(int nextrow)
 	ARG	nextrow:DWORD
 	*/
 	
-	__asm {
-		
-		top_loop:
-			xor	eax,eax			; clear out eax.
-			mov	al,[esi]		; get delta source byte
-			inc	esi
-
-			test	al,al			; check for a SHORTDUMP ; check al incase of sign value.
-			je	short_run
-			js	check_others
-
-		;
-		; SHORTDUMP
-		;
-			mov	ecx,eax			; stick count in cx
-
-		dump_loop:
-			mov	al,[esi]		; get delta XOR byte
-
-			mov	[edi],al		; store that byte on the dest
-
-			inc	edx			; increment our count on current column
-			inc	esi
-			inc	edi
-			cmp	edx,ebx			; are we at the final column
-			jne	end_col1		; if not the jmp over the code
-
-			sub	edi,edx			; get our column back to the beginning.
-			xor	edx,edx			; zero out our column counter
-			add	edi,[nextrow]		; jump to start of next row
-		end_col1:
-
-			dec	ecx
-			jnz	dump_loop
-			jmp	top_loop
-
-		;
-		; SHORTRUN
-		;
-
-		short_run:
-			mov	cl,[esi]		; get count
-			inc	esi			; inc delta source
-
-		do_run:
-			mov	al,[esi]		; get XOR byte
-			inc	esi
-
-		run_loop:
-			mov	[edi],al		; store the byte (instead of XOR against current color)
-
-			inc	edx			; increment our count on current column
-			inc	edi			; go to next dest pixel
-			cmp	edx,ebx			; are we at the final column
-			jne	end_col2		; if not the jmp over the code
-
-			sub	edi,ebx			; get our column back to the beginning.
-			xor	edx,edx			; zero out our column counter
-			add	edi,[nextrow]		; jump to start of next row
-		end_col2:
-
-
-			dec	ecx
-			jnz	run_loop
-			jmp	top_loop
-
-		;
-		; By now, we know it must be a LONGDUMP, SHORTSKIP, LONGRUN, or LONGSKIP
-		;
-
-		check_others:
-			sub	eax,080h		; opcode -= 0x80
-			jnz	do_skip		; if zero then get next word, otherwise use remainder.
-
-			mov	ax,[esi]		; get word code in ax
-			lea	esi,[esi+2]
-			test	ax,ax			; set flags. (not 32bit register so neg flag works)
-			jle	not_long_skip
-
-		;
-		; SHORTSKIP AND LONGSKIP
-		;
-		do_skip:
-			sub	edi,edx			; go back to beginning or row.
-			add	edx,eax			; incriment our count on current row
-		recheck3:
-			cmp	edx,ebx			; are we past the end of the row
-			jb	end_col3  		; if not the jmp over the code
-
-			sub	edx,ebx			; Subtract width from the col counter
-			add	edi,[nextrow]  		; jump to start of next row
-			jmp	recheck3		; jump up to see if we are at the right row
-		end_col3:
-			add	edi,edx			; get to correct position in row.
-			jmp	top_loop
-
-
-		not_long_skip:
-			jz	stop			; long count of zero means stop
-			sub	eax,08000h     		; opcode -= 0x8000
-			test	eax,04000h		; is it a LONGRUN (code & 0x4000)?
-			je	long_dump
-
-		;
-		; LONGRUN
-		;
-			sub	eax,04000h		; opcode -= 0x4000
-			mov	ecx,eax			; use cx as loop count
-			jmp	do_run		; jump to run code.
-
-
-		;
-		; LONGDUMP
-		;
-
-		long_dump:
-			mov	ecx,eax			; use cx as loop count
-			jmp	dump_loop		; go to the dump loop.
-
-		stop:
-
-	}
+	// webcandc: C++ port of the original x86 routine
+	WW_Delta_To_Page(nextrow, false);
 }
 /*
 ;----------------------------------------------------------------------------
@@ -4097,149 +2446,65 @@ void * __cdecl Build_Fading_Table(void const *palette, void const *dest, long in
 	unsigned char idealblue = 0;		//BYTE	
 	unsigned char matchcolor = 0;		//:BYTE		; Tentative match color.
 	
-	__asm {
-		cld
+	// webcandc: C++ port of the original x86 routine
+	// If the source palette is NULL, then just return with current fading table pointer.
+	if (palette == 0 || dest == 0) return (void *)dest;
 
-		; If the source palette is NULL, then just return with current fading table pointer.
-		cmp	[palette],0
-		je	fini
-		cmp	[dest],0
-		je	fini
+	// Fractions above 255 become 255.
+	if ((unsigned long)frac >= 0x100) frac = 0xFF;
 
-		; Fractions above 255 become 255.
-		mov	eax,[frac]
-		cmp	eax,0100h
-		jb	short ok
-		mov	[frac],0FFh
-	ok:
+	unsigned char const *pal = (unsigned char const *)palette;
+	unsigned char *table = (unsigned char *)dest;
 
-		; Record the target gun values.
-		mov	esi,[palette]
-		mov	ebx,[color]
-		add	esi,ebx
-		add	esi,ebx
-		add	esi,ebx
-		lodsb
-		mov	[targetred],al
-		lodsb
-		mov	[targetgreen],al
-		lodsb
-		mov	[targetblue],al
+	// Record the target gun values.
+	unsigned char const *gun = pal + WW_Mul((int)color, 3);
+	targetred = gun[0];
+	targetgreen = gun[1];
+	targetblue = gun[2];
 
-		; Main loop.
-		xor	ebx,ebx			; Remap table index.
+	// Transparent black never gets remapped.
+	*table++ = 0;
 
-		; Transparent black never gets remapped.
-		mov	edi,[dest]
-		mov	[edi],bl
-		inc	edi
+	unsigned char fraction = (unsigned char)((unsigned long)frac >> 1);
 
-		; EBX = source palette logical number (1..255).
-		; EDI = running pointer into dest remap table.
-	mainloop:
-		inc	ebx
-		mov	esi,[palette]
-		add	esi,ebx
-		add	esi,ebx
-		add	esi,ebx
+	// index = source palette logical number (1..255).
+	for (unsigned int index = 1; index <= 255; index++) {
+		gun = pal + index * 3;
 
-		mov	edx,[frac]
-		shr	edx,1
-		; new = orig - ((orig-target) * fraction);
+		// new = orig - ((orig-target) * fraction);
+		idealred = WW_Fade_Gun(gun[0], targetred, fraction);
+		idealgreen = WW_Fade_Gun(gun[1], targetgreen, fraction);
+		idealblue = WW_Fade_Gun(gun[2], targetblue, fraction);
 
-		lodsb				; orig
-		mov	dh,al			; preserve it for later.
-		sub	al,[targetred]		; al = (orig-target)
-		imul	dl			; ax = (orig-target)*fraction
-		shl	ax,1
-		sub	dh,ah			; dh = orig - ((orig-target) * fraction)
-		mov	[idealred],dh		; preserve ideal color gun value.
+		// Sweep through the entire existing palette to find the closest
+		// matching color.  Never matches with color 0.
+		matchcolor = (unsigned char)color;		// Default color (self).
+		matchvalue = -1;						// Ridiculous match value init.
+		for (unsigned int c = 1; c <= 255; c++) {
+			// Recursion through the fading table won't work if a color is allowed
+			// to remap to itself.  Prevent this from occuring.
+			if (c == index) continue;
 
-		lodsb				; orig
-		mov	dh,al			; preserve it for later.
-		sub	al,[targetgreen]	; al = (orig-target)
-		imul	dl			; ax = (orig-target)*fraction
-		shl	ax,1
-		sub	dh,ah			; dh = orig - ((orig-target) * fraction)
-		mov	[idealgreen],dh		; preserve ideal color gun value.
+			// Build the comparison value based on the sum of the differences of the color
+			// guns squared.
+			unsigned char const *p = pal + c * 3;
+			unsigned int value = WW_Gun_Distance(p[0], idealred)
+									 + WW_Gun_Distance(p[1], idealgreen)
+									 + WW_Gun_Distance(p[2], idealblue);
+			if (value == 0) {					// If perfect match found then quit early.
+				matchcolor = (unsigned char)c;
+				break;
+			}
+			if (value <= (unsigned int)matchvalue) {
+				matchvalue = (int)value;		// Record new possible color.
+				matchcolor = (unsigned char)c;
+			}
+		}
 
-		lodsb				; orig
-		mov	dh,al			; preserve it for later.
-		sub	al,[targetblue]		; al = (orig-target)
-		imul	dl			; ax = (orig-target)*fraction
-		shl	ax,1
-		sub	dh,ah			; dh = orig - ((orig-target) * fraction)
-		mov	[idealblue],dh		; preserve ideal color gun value.
-
-		; Sweep through the entire existing palette to find the closest
-		; matching color.  Never matches with color 0.
-
-		mov	eax,[color]
-		mov	[matchcolor],al		; Default color (self).
-		mov	[matchvalue],-1		; Ridiculous match value init.
-		mov	ecx,255
-
-		mov	esi,[palette]		; Pointer to original palette.
-		add	esi,3
-
-		; BH = color index.
-		mov	bh,1
-	innerloop:
-
-		; Recursion through the fading table won't work if a color is allowed
-		; to remap to itself.  Prevent this from occuring.
-		add	esi,3
-		cmp	bh,bl
-		je	short notclose
-		sub	esi,3
-
-		xor	edx,edx			; Comparison value starts null.
-		mov	eax,edx
-		; Build the comparison value based on the sum of the differences of the color
-		; guns squared.
-		lodsb
-		sub	al,[idealred]
-		mov	ah,al
-		imul	ah
-		add	edx,eax
-
-		lodsb
-		sub	al,[idealgreen]
-		mov	ah,al
-		imul	ah
-		add	edx,eax
-
-		lodsb
-		sub	al,[idealblue]
-		mov	ah,al
-		imul	ah
-		add	edx,eax
-		jz	short perfect		; If perfect match found then quit early.
-
-		cmp	edx,[matchvalue]
-		ja	short notclose
-		mov	[matchvalue],edx	; Record new possible color.
-		mov	[matchcolor],bh
-	notclose:
-		inc	bh			; Checking color index.
-		loop	innerloop
-		mov	bh,[matchcolor]
-	perfect:
-		mov	[matchcolor],bh
-		xor	bh,bh			; Make BX valid main index again.
-
-		; When the loop exits, we have found the closest match.
-		mov	al,[matchcolor]
-		stosb
-		cmp	ebx,255
-		jne	mainloop
-
-	fini:
-		mov	eax,[dest]
-//			ret
-
-
+		// When the loop exits, we have found the closest match.
+		*table++ = matchcolor;
 	}
+	return (void *)dest;
 }
 
 
@@ -4400,39 +2665,22 @@ PROC Bump_Color C NEAR
 	short short_desired = (short) desired;
 	bool changed = false;
 	
-	__asm {
-		mov	edi,[pal]		; Original palette pointer.
-		mov	esi,edi
-		mov	eax,0
-		mov	ax,[short_color]
-		add	edi,eax
-		add	edi,eax
-		add	edi,eax			; Offset to changable color.
-		mov	ax,[short_desired]
-		add	esi,eax
-		add	esi,eax
-		add	esi,eax			; Offset to target color.
+	// webcandc: C++ port of the original x86 routine
+	unsigned char *changable = (unsigned char *)pal + 3u * (unsigned short)short_color;			// Offset to changable color.
+	unsigned char const *target = (unsigned char const *)pal + 3u * (unsigned short)short_desired;	// Offset to target color.
 
-		mov	[changed],FALSE		; Presume no change.
-		mov	ecx,3			; Three color guns.
-
-		; Check the color gun.
-	colorloop:
-		mov	al,[BYTE PTR esi]
-		sub	al,[BYTE PTR edi]	; Carry flag is set if subtraction needed.
-		jz	short gotit
-		mov	[changed],TRUE
-		inc	[BYTE PTR edi]		; Presume addition.
-		jnc	short gotit		; oops, subtraction needed so dec twice.
-		dec	[BYTE PTR edi]
-		dec	[BYTE PTR edi]
-	gotit:
-		inc	edi
-		inc	esi
-		loop	colorloop
-
-		movzx	eax,[changed]
+	changed = false;			// Presume no change.
+	for (int gun = 0; gun < 3; gun++) {		// Three color guns.
+		if (target[gun] != changable[gun]) {
+			changed = true;
+			if (target[gun] < changable[gun]) {
+				changable[gun]--;
+			} else {
+				changable[gun]++;
+			}
+		}
 	}
+	return changed ? TRUE : FALSE;
 }
 
 
@@ -4512,44 +2760,13 @@ void __cdecl Buffer_Put_Pixel(void * this_object, int x_pixel, int y_pixel, unsi
 	ARG    	color:BYTE				; what color should we clear to
 	*/
 	
-	__asm {
-		
-	
-			;*===================================================================
-			; Get the viewport information and put bytes per row in ecx
-			;*===================================================================
-			mov	ebx,[this_object]				; get a pointer to viewport
-			xor	eax,eax
-			mov	edi,[ebx]GraphicViewPortClass.Offset	; get the correct offset
-			mov	ecx,[ebx]GraphicViewPortClass.Height	; edx = height of viewport
-			mov	edx,[ebx]GraphicViewPortClass.Width	; ecx = width of viewport
+	// webcandc: C++ port of the original x86 routine
+	// Verify that the X and Y pixel offsets are legal
+	if ((unsigned)x_pixel >= (unsigned)GVP_Width(this_object)) return;
+	if ((unsigned)y_pixel >= (unsigned)GVP_Height(this_object)) return;
 
-			;*===================================================================
-			; Verify that the X pixel offset if legal
-			;*===================================================================
-			mov	eax,[x_pixel]				; find the x position
-			cmp	eax,edx					;   is it out of bounds
-			jae	short done				; if so then get out
-			add	edi,eax					; otherwise add in offset
-
-			;*===================================================================
-			; Verify that the Y pixel offset if legal
-			;*===================================================================
-			mov	eax,[y_pixel]				; get the y position
-			cmp	eax,ecx					;  is it out of bounds
-			jae	done					; if so then get out
-			add	edx,[ebx]GraphicViewPortClass.XAdd	; otherwise find bytes per row
-			add	edx,[ebx]GraphicViewPortClass.Pitch	; add in direct draw pitch
-			mul	edx					; offset = bytes per row * y
-			add	edi,eax					; add it into the offset
-
-			;*===================================================================
-			; Write the pixel to the screen
-			;*===================================================================
-			mov	al,[color]				; read in color value
-			mov	[edi],al				; write it to the screen
-		done:
-	}
+	// Write the pixel to the screen
+	*(GVP_Base(this_object) + x_pixel + WW_Mul(y_pixel, GVP_Stride(this_object))) = color;
 }
 
 
@@ -4625,121 +2842,52 @@ extern "C" int __cdecl Clip_Rect ( int * x , int * y , int * w , int * h , int w
 	arg	height:dword
 */
 
-	__asm {
+	// webcandc: C++ port of the original x86 routine
+	// This Clipping algorithm is a derivation of the very well known
+	// Cohen-Sutherland Line-Clipping test. Due to its simplicity and efficiency
+	// it is probably the most commontly implemented algorithm both in software
+	// and hardware for clipping lines, rectangles, and convex polygons against
+	// a rectagular clipping window. For reference see
+	// "COMPUTER GRAPHICS principles and practice by Foley, Vandam, Feiner, Hughes
+	// pages 113 to 177".
+	int x0 = *x;
+	int y0 = *y;
+	int x1 = WW_Add(*w, x0);		// x1 = x0 + dw
+	int y1 = WW_Add(*h, y0);		// y1 = y0 + dh
+	unsigned code0 = WW_Clip_Code(x0, y0, width, height);
+	unsigned code1 = WW_Clip_Code(x1, y1, width, height);
 
-		;This Clipping algorithm is a derivation of the very well known
-		;Cohen-Sutherland Line-Clipping test. Due to its simplicity and efficiency
-		;it is probably the most commontly implemented algorithm both in software
-		;and hardware for clipping lines, rectangles, and convex polygons against
-		;a rectagular clipping window. For reference see
-		;"COMPUTER GRAPHICS principles and practice by Foley, Vandam, Feiner, Hughes
-		; pages 113 to 177".
-		; Briefly consist in computing the Sutherland code for both end point of
-		; the rectangle to find out if the rectangle is:
-		; - trivially accepted (no further clipping test, return the oroginal data)
-		; - trivially rejected (return with no action, return error code)
-		; - retangle must be iteratively clipped again edges of the clipping window
-		;   and return the clipped rectangle
+	// now perform the rejection test
+	if (code0 & code1) return -1;
+	// now perform the aceptance test
+	if ((code0 | code1) == 0) return 0;
 
-			; get all four pointer into regisnters
-			mov	esi,[x]		; esi = pointer to x
-			mov	edi,[y]		; edi = pointer to x
-			mov	eax,[w]		; eax = pointer to dw
-			mov	ebx,[h]		; ebx = pointer to dh
-
-			; load the actual data into reg
-			mov	esi,[esi]	; esi = x0
-			mov	edi,[edi]	; edi = y0
-			mov	eax,[eax]	; eax = dw
-			mov	ebx,[ebx]	; ebx = dh
-
-			; create a wire frame of the type [x0,y0] , [x1,y1]
-			add	eax,esi		; eax = x1 = x0 + dw
-			add	ebx,edi		; ebx = y1 = y0 + dh
-
-			; we start we suthenland code0 and code1 set to zero
-			xor 	ecx,ecx		; cl = sutherland boolean code0
-			xor 	edx,edx		; dl = sutherland boolean code0
-
-			; now we start computing the to suthenland boolean code for x0 , x1
-			shld	ecx,esi,1	; bit3 of code0 = sign bit of (x0 - 0)
-			shld	edx,eax,1 	; bit3 of code1 = sign bit of (x1 - 0)
-			sub	esi,[width]	; get the difference (x0 - (width + 1))
-			sub	eax,[width]	; get the difference (x1 - (width + 1))
-			dec	esi
-			dec	eax
-			shld	ecx,esi,1	; bit2 of code0 = sign bit of (x0 - (width + 1))
-			shld	edx,eax,1	; bit2 of code1 = sign bit of (x0 - (width + 1))
-
-			; now we start computing the to suthenland boolean code for y0 , y1
-			shld	ecx,edi,1   	; bit1 of code0 = sign bit of (y0 - 0)
-			shld	edx,ebx,1	; bit1 of code1 = sign bit of (y0 - 0)
-			sub	edi,[height]	; get the difference (y0 - (height + 1))
-			sub	ebx,[height]	; get the difference (y1 - (height + 1))
-			dec	edi
-			dec	ebx
-			shld	ecx,edi,1	; bit0 of code0 = sign bit of (y0 - (height + 1))
-			shld	edx,ebx,1	; bit0 of code1 = sign bit of (y1 - (height + 1))
-
-			; Bit 2 and 0 of cl and bl are complemented
-			xor	cl,5		; reverse bit2 and bit0 in code0
-			xor	dl,5 		; reverse bit2 and bit0 in code1
-
-			; now perform the rejection test
-			mov	eax,-1		; set return code to false
-			mov	bl,cl 		; save code0 for future use
-			test	dl,cl  		; if any two pair of bit in code0 and code1 is set
-			jnz	clip_out	; then rectangle is outside the window
-
-			; now perform the aceptance test
-			xor	eax,eax		; set return code to true
-			or	bl,dl		; if all pair of bits in code0 and code1 are reset
-			jz	clip_out	; then rectangle is insize the window.								      '
-
-			; we need to clip the rectangle iteratively
-			mov	eax,-1		; set return code to false
-			test	cl,1000b	; if bit3 of code0 is set then the rectangle
-			jz	left_ok	; spill out the left edge of the window
-			mov	edi,[x]		; edi = a pointer to x0
-			mov	ebx,[w]		; ebx = a pointer to dw
-			mov	esi,[edi]	; esi = x0
-			mov	[dword ptr edi],0 ; set x0 to 0 "this the left edge value"
-			add	[ebx],esi	; adjust dw by x0, since x0 must be negative
-
-		left_ok:
-			test	cl,0010b	; if bit1 of code0 is set then the rectangle
-			jz	bottom_ok	; spill out the bottom edge of the window
-			mov	edi,[y]		; edi = a pointer to y0
-			mov	ebx,[h]		; ebx = a pointer to dh
-			mov	esi,[edi]	; esi = y0
-			mov	[dword ptr edi],0 ; set y0 to 0 "this the bottom edge value"
-			add	[ebx],esi	; adjust dh by y0, since y0 must be negative
-
-		bottom_ok:
-			test	dl,0100b	; if bit2 of code1 is set then the rectangle
-			jz	right_ok	; spill out the right edge of the window
-			mov	edi,[w] 	; edi = a pointer to dw
-			mov	esi,[x]		; esi = a pointer to x
-			mov	ebx,[width]	; ebx = the width of the window
-			sub	ebx,[esi] 	; the new dw is the difference (width-x0)
-			mov	[edi],ebx	; adjust dw to (width - x0)
-			jle	clip_out	; if (width-x0) = 0 then the clipped retangle
-						; has no width we are done
-		right_ok:
-			test	dl,0001b	; if bit0 of code1 is set then the rectangle
-			jz	clip_ok	; spill out the top edge of the window
-			mov	edi,[h] 	; edi = a pointer to dh
-			mov	esi,[y]		; esi = a pointer to y0
-			mov	ebx,[height]	; ebx = the height of the window
-			sub	ebx,[esi] 	; the new dh is the difference (height-y0)
-			mov	[edi],ebx	; adjust dh to (height-y0)
-			jle	clip_out	; if (width-x0) = 0 then the clipped retangle
-						; has no width we are done
-		clip_ok:
-			mov	eax,1  	; signal the calling program that the rectangle was modify
-		clip_out:
-		//ret
+	// we need to clip the rectangle iteratively
+	if (code0 & 8) {
+		// spill out the left edge of the window
+		int old_x = *x;
+		*x = 0;
+		*w = WW_Add(*w, old_x);
 	}
+	if (code0 & 2) {
+		// spill out the bottom edge of the window
+		int old_y = *y;
+		*y = 0;
+		*h = WW_Add(*h, old_y);
+	}
+	if (code1 & 4) {
+		// spill out the right edge of the window
+		int cur_x = *x;
+		*w = WW_Sub(width, cur_x);
+		if (width <= cur_x) return -1;		// clipped retangle has no width
+	}
+	if (code1 & 1) {
+		// spill out the top edge of the window
+		int cur_y = *y;
+		*h = WW_Sub(height, cur_y);
+		if (height <= cur_y) return -1;
+	}
+	return 1;		// signal the calling program that the rectangle was modify
 
 	//ENDP	Clip_Rect
 }
@@ -4777,59 +2925,33 @@ extern "C" int __cdecl Confine_Rect ( int * x , int * y , int w , int h , int wi
 	arg	width :dword
 	arg	height:dword
 */
-	__asm {		  
-	
-			xor	eax,eax
-			mov	ebx,[x]
-			mov	edi,[w]
+	// webcandc: C++ port of the original x86 routine
+	int result = 0;
+	int neg;
+	int over;
 
-			mov	esi,[ebx]
-			add	edi,[ebx]
-
-			sub	edi,[width]
-			neg	esi
-			dec	edi
-
-			test	esi,edi
-			jl	x_axix_ok
-			mov	eax,1
-
-			test	esi,esi
-			jl	shift_right
-			mov	[dword ptr ebx],0
-			jmp	x_axix_ok
-		shift_right:
-			inc	edi
-			sub	[ebx],edi
-		x_axix_ok:
-			mov	ebx,[y]
-			mov	edi,[h]
-
-			mov	esi,[ebx]
-			add	edi,[ebx]
-
-			sub	edi,[height]
-			neg	esi
-			dec	edi
-
-			test	esi,edi
-			jl	confi_out
-			mov	eax,1
-
-			test	esi,esi
-			jl	shift_top
-			mov	[dword ptr ebx],0
-
-			//ret
-			jmp confi_out
-		shift_top:
-			inc	edi
-			sub	[ebx],edi
-		confi_out:
-			//ret
-
-			//ENDP	Confine_Rect
+	neg = WW_Neg(*x);								// -x
+	over = WW_Sub(WW_Sub(WW_Add(w, *x), width), 1);	// x + w - width - 1
+	if (!((neg & over) < 0)) {
+		result = 1;
+		if (neg < 0) {
+			*x = WW_Sub(*x, WW_Add(over, 1));		// shift_right
+		} else {
+			*x = 0;
+		}
 	}
+
+	neg = WW_Neg(*y);
+	over = WW_Sub(WW_Sub(WW_Add(h, *y), height), 1);
+	if (!((neg & over) < 0)) {
+		result = 1;
+		if (neg < 0) {
+			*y = WW_Sub(*y, WW_Add(over, 1));		// shift_top
+		} else {
+			*y = 0;
+		}
+	}
+	return result;
 }
 
 
@@ -4894,230 +3016,87 @@ extern "C" unsigned long __cdecl LCW_Uncompress(void *source, void *dest, unsign
 //	LOCAL lastcom:DWORD
 //	LOCAL lastcom1:DWORD
 		
-	unsigned long a1stdest;
-	unsigned long  maxlen;
-	unsigned long lastbyte;
-	//unsigned long lastcom;
-	//unsigned long lastcom1;
+	// webcandc: C++ port of the original x86 routine
+	//
+	// uncompress data to the following codes in the format b = byte, w = word
+	// n = byte code pulled from compressed data
+	//   Bit field of n		command		description
+	// n=0xxxyyyy,yyyyyyyy		short run	back y bytes and run x+3
+	// n=10xxxxxx,n1,n2,...,nx+1	med length	copy the next x+1 bytes
+	// n=11xxxxxx,w1			med run		run x+3 bytes from offset w1
+	// n=11111111,w1,w2		long copy	copy w1 bytes from offset w2
+	// n=11111110,w1,b1		long run	run byte b1 for w1 bytes
+	// n=10000000			end		end of data reached
+	//
+	// All copies are forward byte copies (the source may overlap the
+	// destination to replicate a pattern); the asm's dword paths produce
+	// the same bytes.
+	unsigned char *dst = (unsigned char *)dest;
+	unsigned char *a1stdest = dst;
+	unsigned char *lastbyte = dst + length_;
+	unsigned char const *source_ptr = (unsigned char const *)source;	// ebx: saved source offset
+	unsigned char const *src;
+	unsigned int maxlen;
+	unsigned int count;
+	unsigned int code;
 
-	__asm {
+	for (;;) {
+		maxlen = (unsigned int)(lastbyte - dst);		// get the remaining byte to uncomp
+		if (maxlen == 0) break;							// were done
 
+		src = source_ptr;
+		code = *src++;
 
-		mov	edi,[dest]
-		mov	esi,[source]
-		mov	edx,[length_]
+		if ((code & 0x80) == 0) {
+			// short run: back y bytes and run x+3
+			count = (code >> 4) + 3;
+			if (count > maxlen) count = maxlen;			// max it out so it dosen't overrun
+			unsigned int offset = ((code & 0x0F) << 8) | src[0];
+			source_ptr = src + 1;
+			WW_Copy_Forward(dst, dst - offset, (int)count);
+			dst += count;
+			continue;
+		}
 
-	;
-	;
-	; uncompress data to the following codes in the format b = byte, w = word
-	; n = byte code pulled from compressed data
-	;   Bit field of n		command		description
-	; n=0xxxyyyy,yyyyyyyy		short run	back y bytes and run x+3
-	; n=10xxxxxx,n1,n2,...,nx+1	med length	copy the next x+1 bytes
-	; n=11xxxxxx,w1			med run		run x+3 bytes from offset w1
-	; n=11111111,w1,w2		long copy	copy w1 bytes from offset w2
-	; n=11111110,w1,b1		long run	run byte b1 for w1 bytes
-	; n=10000000			end		end of data reached
-	;
+		if ((code & 0x40) == 0) {
+			if (code == 0x80) break;						// is it the end?
+			// med length: copy the next x+1 bytes
+			count = code & 0x3F;
+			if (count > maxlen) count = maxlen;
+			WW_Copy_Forward(dst, src, (int)count);
+			dst += count;
+			source_ptr = src + count;
+			continue;
+		}
 
-		mov	[a1stdest],edi
-		add	edx,edi
-		mov	[lastbyte],edx
-		cld			; make sure all lod and sto are forward
-		mov	ebx,esi		; save the source offset
+		count = (code & 0x3F) + 3;
 
-	loop_label:
-		mov	eax,[lastbyte]
-		sub	eax,edi		; get the remaining byte to uncomp
-		jz	short out_label		; were done
+		if (code == 0xFE) {
+			// long run: run byte b1 for w1 bytes
+			count = src[0] | (src[1] << 8);
+			unsigned char value = src[2];
+			source_ptr = src + 3;
+			if (count > maxlen) count = maxlen;
+			memset(dst, value, count);
+			dst += count;
+			continue;
+		}
 
-		mov	[maxlen],eax	; save for string commands
-		mov	esi,ebx		; mov in the source index
+		if (code == 0xFF) {
+			// long copy: copy w1 bytes from offset w2
+			count = src[0] | (src[1] << 8);
+			src += 2;
+		}
 
-		xor	eax,eax
-		mov	al,[esi]
-		inc	esi
-		test	al,al		; see if its a short run
-		js	short notshort
-
-		mov	ecx,eax		;put count nibble in cl
-
-		mov	ah,al		; put rel offset high nibble in ah
-		and	ah,0Fh		; only 4 bits count
-
-		shr	cl,4		; get run -3
-		add	ecx,3		; get actual run length
-
-		cmp	ecx,[maxlen]	; is it too big to fit?
-		jbe	short rsok		; if not, its ok
-
-		mov	ecx,[maxlen]	; if so, max it out so it dosen't overrun
-
-	rsok:
-		mov	al,[esi]	; get rel offset low byte
-		lea	ebx,[esi+1]	; save the source offset
-		mov	esi,edi		; get the current dest
-		sub	esi,eax		; get relative offset
-
-		rep	movsb
-
-		jmp	loop_label
-
-	notshort:
-		test	al,40h		; is it a length?
-		jne	short notlength	; if not it could be med or long run
-
-		cmp	al,80h		; is it the end?
-		je	short out_label		; if so its over
-
-		mov	cl,al		; put the byte in count register
-		and	ecx,3Fh		; and off the extra bits
-
-		cmp	ecx,[maxlen]	; is it too big to fit?
-		jbe	short lenok		; if not, its ok
-
-		mov	ecx,[maxlen]	; if so, max it out so it dosen't overrun
-
-	lenok:
-		rep movsb
-
-		mov	ebx,esi		; save the source offset
-		jmp	loop_label
-
-	out_label:
-	      	mov	eax,edi
-		sub	eax,[a1stdest]
-		jmp	label_exit
-
-	notlength:
-		mov	cl,al		; get the entire code
-		and	ecx,3Fh		; and off all but the size -3
-		add	ecx,3		; add 3 for byte count
-
-		cmp	al,0FEh
-		jne	short notrunlength
-
-		xor	ecx,ecx
-		mov	cx,[esi]
-
-		xor	eax,eax
-		mov	al,[esi+2]
-		lea	ebx,[esi+3]	;save the source offset
-
-		cmp	ecx,[maxlen]	; is it too big to fit?
-		jbe	short runlenok		; if not, its ok
-
-		mov	ecx,[maxlen]	; if so, max it out so it dosen't overrun
-
-	runlenok:
-		test	ecx,0ffe0h
-		jnz	dont_use_stosb
-		rep	stosb
-		jmp	loop_label
-
-
-	dont_use_stosb:
-		mov	ah,al
-		mov	edx,eax
-		shl	eax,16
-		or	eax,edx
-
-		test	edi,3
-		jz	aligned
-
-		mov	[edi],eax
-		mov	edx,edi
-		and	edi,0fffffffch
-		lea	edi,[edi+4]
-		and	edx,3
-		dec	dl
-		xor	dl,3
-		sub	ecx,edx
-
-	aligned:
-		mov	edx,ecx
-		shr	ecx,2
-		rep	stosd
-
-		and	edx,3
-		jz	loop_label
-		mov	ecx,edx
-		rep	stosb
-		jmp	loop_label
-
-
-
-
-
-
-	notrunlength:
-		cmp	al,0FFh		; is it a long run?
-		jne	short notlong	; if not use the code as the size
-
-		xor     ecx,ecx
-		xor	eax,eax
-		mov	cx,[esi]	; if so, get the size
-		lea	esi,[esi+2]
-
-	notlong:
-		mov	ax,[esi]	;get the real index
-		add	eax,[a1stdest]	;add in the 1st index
-		lea	ebx,[esi+2]	;save the source offset
-		cmp	ecx,[maxlen]	;compare for overrun
-		mov	esi,eax		;use eax as new source
-		jbe	short runok	; if not, its ok
-
-		mov	ecx,[maxlen]	; if so, max it out so it dosen't overrun
-
-	runok:
-		test	ecx,0ffe0h
-		jnz	dont_use_movsb
-		rep	movsb
-		jmp	loop_label
-
-
-
-
-	dont_use_movsb:
-		lea	edx,[edi+0fffffffch]
-		cmp	esi,edx
-		ja	use_movsb
-
-		test	edi,3
-		jz	aligned2
-
-		mov	eax,[esi]
-		mov	[edi],eax
-		mov	edx,edi
-		and	edi,0fffffffch
-		lea	edi,[edi+4]
-		and	edx,3
-		dec	dl
-		xor	dl,3
-		sub	ecx,edx
-		add	esi,edx
-
-	aligned2:
-		mov	edx,ecx
-		shr	ecx,2
-		and	edx,3
-		rep	movsd
-		mov	ecx,edx
-	use_movsb:
-		rep	movsb
-		jmp	loop_label
-
-
-
-
-	label_exit:
-		mov	eax,edi
-		mov	ebx,[dest]
-		sub	eax,ebx
-
-		//ret
-
+		// med run / long copy from an absolute offset in the destination
+		unsigned char const *from = a1stdest + (src[0] | (src[1] << 8));
+		source_ptr = src + 2;
+		if (count > maxlen) count = maxlen;
+		WW_Copy_Forward(dst, from, (int)count);
+		dst += count;
 	}
+
+	return (unsigned long)(dst - (unsigned char *)dest);
 }
 
 
@@ -5219,211 +3198,68 @@ extern "C" long __cdecl Buffer_To_Page(int x_pixel, int y_pixel, int pixel_width
 	LOCAL	dest_area   :  dword
 */
 
-	unsigned long x1_pixel;
-	unsigned long y1_pixel;
-	unsigned long scr_x;
-	unsigned long scr_y;
-	unsigned long dest_ajust_width;
-	unsigned long scr_ajust_width;
-	//unsigned long dest_area;
+	// webcandc: C++ port of the original x86 routine
+	int x1_pixel;
+	int y1_pixel;
+	int scr_x;
+	int scr_y;
+	int dest_ajust_width;
+	int scr_ajust_width;
+	unsigned code0;
+	unsigned code1;
 
-	__asm {
-	
-			cmp	[ src ] , 0
-			jz	real_out
+	if (src == 0) return 0;		// (the asm returned whatever was in eax)
 
-
-		; Clip dest Rectangle against source Window boundaries.
-
-			mov	[ scr_x ] , 0
-			mov	[ scr_y ] , 0
-			mov  	esi , [ dest ]	    ; get ptr to dest
-			xor 	ecx , ecx
-			xor 	edx , edx
-			mov	edi , [esi]GraphicViewPortClass.Width  ; get width into register
-			mov	ebx , [ x_pixel ]
-			mov	eax , [ x_pixel ]
-			add	ebx , [ pixel_width ]
-			shld	ecx , eax , 1
-			mov	[ x1_pixel ] , ebx
-			inc	edi
-			shld	edx , ebx , 1
-			sub	eax , edi
-			sub	ebx , edi
-			shld	ecx , eax , 1
-			shld	edx , ebx , 1
-
-			mov	edi, [esi]GraphicViewPortClass.Height ; get height into register
-			mov	ebx , [ y_pixel ]
-			mov	eax , [ y_pixel ]
-			add	ebx , [ pixel_height ]
-			shld	ecx , eax , 1
-			mov	[ y1_pixel ] , ebx
-			inc	edi
-			shld	edx , ebx , 1
-			sub	eax , edi
-			sub	ebx , edi
-			shld	ecx , eax , 1
-			shld	edx , ebx , 1
-
-			xor	cl , 5
-			xor	dl , 5
-			mov	al , cl
-			test	dl , cl
-			jnz	real_out
-			or	al , dl
-			jz	do_blit
-
-			test	cl , 1000b
-			jz	dest_left_ok
-			mov	eax , [ x_pixel ]
-			neg	eax
-			mov	[ x_pixel ] , 0
-			mov	[ scr_x ] , eax
-
-		dest_left_ok:
-			test	cl , 0010b
-			jz	dest_bottom_ok
-			mov	eax , [ y_pixel ]
-			neg	eax
-			mov	[ y_pixel ] , 0
-			mov	[ scr_y ] , eax
-
-		dest_bottom_ok:
-			test	dl , 0100b
-			jz	dest_right_ok
-			mov	eax , [esi]GraphicViewPortClass.Width  ; get width into register
-			mov	[ x1_pixel ] , eax
-		dest_right_ok:
-			test	dl , 0001b
-			jz	do_blit
-			mov	eax , [esi]GraphicViewPortClass.Height  ; get width into register
-			mov	[ y1_pixel ] , eax
-
-		do_blit:
-
-   		    cld
-
-   		    mov	eax , [esi]GraphicViewPortClass.XAdd
-   		    add	eax , [esi]GraphicViewPortClass.Width
-   		    add	eax , [esi]GraphicViewPortClass.Pitch
-   		    mov	edi , [esi]GraphicViewPortClass.Offset
-
-   		    mov	ecx , eax
-   		    mul	[ y_pixel ]
-   		    add	edi , [ x_pixel ]
-   		    add	edi , eax
-
-   		    add	ecx , [ x_pixel ]
-   		    sub	ecx , [ x1_pixel ]
-   		    mov	[ dest_ajust_width ] , ecx
-
-
-   		    mov	esi , [ src ]
-   		    mov	eax , [ pixel_width ]
-   		    sub	eax , [ x1_pixel ]
-   		    add	eax , [ x_pixel ]
-   		    mov	[ scr_ajust_width ] , eax
-
-   		    mov	eax , [ scr_y ]
-   		    mul 	[ pixel_width ]
-   		    add	eax , [ scr_x ]
-   		    add	esi , eax
-
-   		    mov	edx , [ y1_pixel ]
-   		    mov	eax , [ x1_pixel ]
-
-   		    sub	edx , [ y_pixel ]
-   		    jle	real_out
-   		    sub	eax , [ x_pixel ]
-   		    jle	real_out
-
-
-		; ********************************************************************
-		; Forward bitblit only
-
-		//IF TRANSP
-   	//	    test	[ trans ] , 1
-   	//	    jnz	forward_Blit_trans
-		//ENDIF
-
-
-		; the inner loop is so efficient that
-		; the optimal consept no longer apply because
-		; the optimal byte have to by a number greather than 9 bytes
-   		    cmp	eax , 10
-   		    jl	forward_loop_bytes
-
-		forward_loop_dword:
-   		    mov	ecx , edi
-   		    mov	ebx , eax
-   		    neg	ecx
-   		    and	ecx , 3
-   		    sub	ebx , ecx
-   		    rep	movsb
-   		    mov	ecx , ebx
-   		    shr	ecx , 2
-   		    rep	movsd
-   		    mov	ecx , ebx
-   		    and	ecx , 3
-   		    rep	movsb
-   		    add	esi , [ scr_ajust_width ]
-   		    add	edi , [ dest_ajust_width ]
-   		    dec	edx
-   		    jnz	forward_loop_dword
-   		    jmp	real_out	//ret
-
-		forward_loop_bytes:
-   		    mov	ecx , eax
-   		    rep	movsb
-   		    add	esi , [ scr_ajust_width ]
-   		    add	edi , [ dest_ajust_width ]
-   		    dec	edx					; decrement the height
-   		    jnz	forward_loop_bytes
-   		  //  ret
-
-		//IF  TRANSP
-		//
-		//
-		//forward_Blit_trans:
-		//
-		//
-   	//	    mov	ecx , eax
-   	//	    and	ecx , 01fh
-   	//	    lea	ecx , [ ecx + ecx * 4 ]
-   	//	    neg	ecx
-   	//	    shr	eax , 5
-   	//	    lea	ecx , [ transp_reference + ecx * 2 ]
-   	//	    mov	[ y1_pixel ] , ecx
-		//
-		//
-		//forward_loop_trans:
-   	//	    mov	ecx , eax
-   	//	    jmp	[ y1_pixel ]
-		//forward_trans_line:
-   	//	    REPT	32
-   	//	    local	transp_pixel
-   	//	    		mov	bl , [ esi ]
-   	//	    		inc	esi
-   	//	    		test	bl , bl
-   	//	    		jz	transp_pixel
-   	//	    		mov	[ edi ] , bl
-   	//	 	    transp_pixel:
-   	//	    		inc	edi
-		//	ENDM
-   	//	 transp_reference:
-   	//	    dec	ecx
-   	//	    jge	forward_trans_line
-   	//	    add	esi , [ scr_ajust_width ]
-   	//	    add	edi , [ dest_ajust_width ]
-   	//	    dec	edx
-   	//	    jnz	forward_loop_trans
-   	//	    ret
-		//ENDIF
-
-		real_out:
-   		    //ret
+	// Clip dest Rectangle against source Window boundaries.
+	scr_x = 0;
+	scr_y = 0;
+	int win_w = GVP_Width(dest);
+	int win_h = GVP_Height(dest);
+	x1_pixel = WW_Add(x_pixel, pixel_width);
+	y1_pixel = WW_Add(y_pixel, pixel_height);
+	code0 = WW_Clip_Code(x_pixel, y_pixel, win_w, win_h);
+	code1 = WW_Clip_Code(x1_pixel, y1_pixel, win_w, win_h);
+	if (code0 & code1) {
+		// eax held y_pixel-(height+1) with the first clip code moved into al
+		return (long)(int)(((unsigned)WW_Sub(WW_Sub(y_pixel, win_h), 1) & ~0xFFu) | code0);
 	}
+	if (code0 | code1) {
+		if (code0 & 8) {
+			scr_x = WW_Neg(x_pixel);
+			x_pixel = 0;
+		}
+		if (code0 & 2) {
+			scr_y = WW_Neg(y_pixel);
+			y_pixel = 0;
+		}
+		if (code1 & 4) x1_pixel = win_w;
+		if (code1 & 1) y1_pixel = win_h;
+	}
+
+	// do_blit:
+	int stride = GVP_Stride(dest);
+	unsigned char *dst = GVP_Base(dest) + WW_Mul(stride, y_pixel) + x_pixel;
+	dest_ajust_width = WW_Sub(WW_Add(stride, x_pixel), x1_pixel);
+
+	unsigned char const *src_ptr = (unsigned char const *)src;
+	scr_ajust_width = WW_Add(WW_Sub(pixel_width, x1_pixel), x_pixel);
+	src_ptr += WW_Add(WW_Mul(scr_y, pixel_width), scr_x);
+
+	if (y1_pixel <= y_pixel) return x1_pixel;
+	int height = WW_Sub(y1_pixel, y_pixel);
+	int width = WW_Sub(x1_pixel, x_pixel);
+	if (x1_pixel <= x_pixel) return width;
+
+	// Forward bitblit only
+	do {
+		WW_Copy_Forward(dst, src_ptr, width);
+		src_ptr += width;
+		dst += width;
+		src_ptr += scr_ajust_width;
+		dst += dest_ajust_width;
+	} while (--height != 0);
+
+	return width;		// eax still held the clipped width
 }
 
 			//ENDP	Buffer_To_Page
@@ -5463,46 +3299,14 @@ extern "C" long __cdecl Buffer_To_Page(int x_pixel, int y_pixel, int pixel_width
 
 extern "C" int __cdecl Buffer_Get_Pixel(void * this_object, int x_pixel, int y_pixel)
 {
-	__asm {		  
+	// webcandc: C++ port of the original x86 routine
+	// Verify that the X and Y pixel offsets are legal.  (Like the asm, an
+	// out-of-range coordinate is returned as-is, since it was left in eax.)
+	if ((unsigned)x_pixel >= (unsigned)GVP_Width(this_object)) return x_pixel;
+	if ((unsigned)y_pixel >= (unsigned)GVP_Height(this_object)) return y_pixel;
 
-		;*===================================================================
-		; Get the viewport information and put bytes per row in ecx
-		;*===================================================================
-		mov	ebx,[this_object]				; get a pointer to viewport
-		xor	eax,eax
-		mov	edi,[ebx]GraphicViewPortClass.Offset	; get the correct offset
-		mov	ecx,[ebx]GraphicViewPortClass.Height	; edx = height of viewport
-		mov	edx,[ebx]GraphicViewPortClass.Width	; ecx = width of viewport
-
-		;*===================================================================
-		; Verify that the X pixel offset if legal
-		;*===================================================================
-		mov	eax,[x_pixel]				; find the x position
-		cmp	eax,edx					;   is it out of bounds
-		jae	short exit_label				; if so then get out
-		add	edi,eax					; otherwise add in offset
-
-		;*===================================================================
-		; Verify that the Y pixel offset if legal
-		;*===================================================================
-		mov	eax,[y_pixel]				; get the y position
-		cmp	eax,ecx					;  is it out of bounds
-		jae	exit_label					; if so then get out
-		add	edx,[ebx]GraphicViewPortClass.XAdd	; otherwise find bytes per row
-		add	edx,[ebx]GraphicViewPortClass.Pitch	; otherwise find bytes per row
-		mul	edx					; offset = bytes per row * y
-		add	edi,eax					; add it into the offset
-
-		;*===================================================================
-		; Write the pixel to the screen
-		;*===================================================================
-		xor	eax,eax					; clear the word
-		mov	al,[edi]				; read in the pixel
-	exit_label:
-		//ret
-		//ENDP	Buffer_Get_Pixel
-
-	}
+	// Read the pixel from the screen
+	return *(GVP_Base(this_object) + x_pixel + WW_Mul(y_pixel, GVP_Stride(this_object)));
 }
 
 

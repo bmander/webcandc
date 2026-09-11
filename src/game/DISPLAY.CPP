@@ -1784,7 +1784,8 @@ ObjectClass * DisplayClass::Cell_Object(CELL cell, int x, int y)
 		*/
 		int num = Messages.Num_Messages();
 		if (num) {
-			for (CELL cell = Coord_Cell(TacticalCoord); cell < Coord_Cell(TacticalCoord) + Lepton_To_Cell(TacLeptonWidth)+1; cell++) {
+			CELL cell;
+			for (cell = Coord_Cell(TacticalCoord); cell < Coord_Cell(TacticalCoord) + Lepton_To_Cell(TacLeptonWidth)+1; cell++) {
 				(*this)[cell].Redraw_Objects();
 			}
 			for (cell = Coord_Cell(TacticalCoord) + MAP_CELL_W;
@@ -3486,7 +3487,8 @@ void DisplayClass::Compute_Start_Pos(void)
 	long x = 0;
 	long y = 0;
 	long num = 0;
-	for (int i = 0; i < Infantry.Count(); i++) {
+	int i;
+	for (i = 0; i < Infantry.Count(); i++) {
 		InfantryClass * infp = Infantry.Ptr(i);
 		if (!infp->IsInLimbo && infp->House == PlayerPtr) {
 			x += (long)Coord_XCell (infp->Coord);

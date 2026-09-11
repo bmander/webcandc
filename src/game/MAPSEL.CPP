@@ -334,7 +334,8 @@ void Map_Selection(void)
 	Read_Interpolation_Palette("MAP_LOCL.PAL");
 	Play_Sample(appear1, 255, Options.Normalize_Sound(110));
 	Fade_Palette_To(localpalette, FADE_PALETTE_MEDIUM, Call_Back);
-	for (int i = 1; i < Get_Animation_Frame_Count(greyearth); i++) {
+	int i;
+	for (i = 1; i < Get_Animation_Frame_Count(greyearth); i++) {
 		Call_Back_Delay(4);
 		Animate_Frame(greyearth, *PseudoSeenBuff, i);
 	}

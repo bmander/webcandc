@@ -25,7 +25,8 @@
 #define OUT
 #define OPTIONAL
 #define WINUSERAPI
-#define DECLARE_HANDLE(name) typedef struct name##__ *name
+/* Non-STRICT Win32: every handle type is just HANDLE, as the 1995 code assumes. */
+#define DECLARE_HANDLE(name) typedef HANDLE name
 
 #ifndef NULL
 #define NULL 0
@@ -79,6 +80,7 @@ typedef long HRESULT;
 typedef unsigned short ATOM;
 typedef DWORD COLORREF;
 typedef void *HANDLE;
+typedef int (WINAPI *FARPROC)(void);
 typedef HANDLE *LPHANDLE;
 typedef HANDLE HGLOBAL;
 typedef HANDLE HLOCAL;
@@ -128,6 +130,7 @@ typedef HKEY *PHKEY;
 #define E_OUTOFMEMORY ((HRESULT)0x8007000EL)
 #define E_INVALIDARG ((HRESULT)0x80070057L)
 #define E_NOINTERFACE ((HRESULT)0x80004002L)
+#define E_NOTIMPL ((HRESULT)0x80004001L)
 
 typedef struct tagRECT { LONG left, top, right, bottom; } RECT, *LPRECT, *PRECT;
 typedef const RECT *LPCRECT;
@@ -215,6 +218,7 @@ typedef struct tagWNDCLASS {
 
 #define PM_NOREMOVE 0x0000
 #define PM_REMOVE   0x0001
+#define PM_NOYIELD  0x0002
 
 /* Virtual key codes. */
 #define VK_LBUTTON  0x01
@@ -326,6 +330,8 @@ typedef struct tagWNDCLASS {
 #define SW_RESTORE 9
 #define WS_POPUP 0x80000000L
 #define WS_VISIBLE 0x10000000L
+#define WS_MAXIMIZE 0x01000000L
+#define WS_OVERLAPPEDWINDOW 0x00CF0000L
 #define WS_EX_TOPMOST 0x00000008L
 #define CS_HREDRAW 0x0002
 #define CS_VREDRAW 0x0001
@@ -473,6 +479,7 @@ HWND WINAPI SetActiveWindow(HWND wnd);
 BOOL WINAPI SetForegroundWindow(HWND wnd);
 HWND WINAPI GetForegroundWindow(void);
 HWND WINAPI FindWindow(LPCSTR cls, LPCSTR name);
+BOOL WINAPI IsWindow(HWND wnd);
 BOOL WINAPI IsIconic(HWND wnd);
 BOOL WINAPI InvalidateRect(HWND wnd, const RECT *rect, BOOL erase);
 BOOL WINAPI GetClientRect(HWND wnd, LPRECT rect);
@@ -538,6 +545,12 @@ void WINAPI LeaveCriticalSection(LPCRITICAL_SECTION cs);
 BOOL WINAPI GetVersionEx(LPOSVERSIONINFO info);
 void WINAPI GlobalMemoryStatus(LPMEMORYSTATUS status);
 UINT WINAPI WinExec(LPCSTR cmd, UINT show);
+UINT WINAPI RegisterWindowMessage(LPCSTR name);
+HMODULE WINAPI LoadLibrary(LPCSTR name);
+BOOL WINAPI FreeLibrary(HMODULE mod);
+FARPROC WINAPI GetProcAddress(HMODULE mod, LPCSTR name);
+BOOL WINAPI IsBadReadPtr(const void *ptr, UINT size);
+BOOL WINAPI IsBadWritePtr(void *ptr, UINT size);
 HINSTANCE WINAPI ShellExecute(HWND wnd, LPCSTR op, LPCSTR file, LPCSTR params, LPCSTR dir, int show);
 
 /* Memory. */
@@ -607,16 +620,122 @@ int WINAPI GetDeviceCaps(HDC dc, int index);
 }
 #endif
 
-/* Winsock types that the real <windows.h> dragged in (TCPIP.H uses them). */
-#include <netinet/in.h>
+/*
+** Winsock 1.1 (TCPIP.CPP). The BSD socket calls come from the C library
+** (headers included by the prelude); WSAStartup reports that no network
+** stack is available, so the game never gets as far as opening a socket.
+*/
 typedef unsigned int SOCKET;
 typedef struct in_addr IN_ADDR;
 typedef struct sockaddr_in SOCKADDR_IN;
-typedef struct sockaddr SOCKADDR;
+typedef struct sockaddr SOCKADDR, *LPSOCKADDR;
+typedef struct hostent HOSTENT, *LPHOSTENT;
+typedef struct linger LINGER;
 typedef struct WSAData { WORD wVersion, wHighVersion; char szDescription[257]; char szSystemStatus[129]; unsigned short iMaxSockets, iMaxUdpDg; char *lpVendorInfo; } WSADATA, *LPWSADATA;
 #define MAXGETHOSTSTRUCT 1024
 #define INVALID_SOCKET ((SOCKET)(~0))
 #define SOCKET_ERROR (-1)
+#define FD_READ    0x01
+#define FD_WRITE   0x02
+#define FD_OOB     0x04
+#define FD_ACCEPT  0x08
+#define FD_CONNECT 0x10
+#define FD_CLOSE   0x20
+#define WSAGETSELECTEVENT(l) LOWORD(l)
+#define WSAGETSELECTERROR(l) HIWORD(l)
+#define WSAGETASYNCERROR(l)  HIWORD(l)
+#define WSAGETASYNCBUFLEN(l) LOWORD(l)
+#define WSAEWOULDBLOCK  10035
+#define WSAECONNRESET   10054
+#define WSASYSNOTREADY  10091
+
+/* DDEML (DDE.CPP / CCDDE.CPP, the WChat link). DdeInitialize fails. */
+typedef HDDEDATA (CALLBACK *PFNCALLBACK)(UINT, UINT, HCONV, HSZ, HSZ, HDDEDATA, DWORD, DWORD);
+typedef struct tagCONVCONTEXT { UINT cb; UINT wFlags; UINT wCountryID; int iCodePage; DWORD dwLangID; DWORD dwSecurity; SECURITY_ATTRIBUTES qos; } CONVCONTEXT, *PCONVCONTEXT;
+#define CP_WINANSI 1004
+#define APPCLASS_STANDARD 0x00000000L
+#define CBF_FAIL_SELFCONNECTIONS 0x00001000
+#define DMLERR_NO_ERROR 0
+#define DMLERR_DLL_NOT_INITIALIZED 0x4003
+#define DNS_REGISTER 0x0001
+#define DNS_UNREGISTER 0x0002
+#define CF_TEXT 1
+#define DDE_FACK 0x8000
+#define DDE_FBUSY 0x4000
+#define DDE_FNOTPROCESSED 0x0000
+#define SZDDESYS_TOPIC "System"
+#define XTYP_ADVDATA 0x4010
+#define XTYP_CONNECT 0x1062
+#define XTYP_DISCONNECT 0x00C2
+#define XTYP_EXECUTE 0x4050
+#define XTYP_POKE 0x4090
+#define XTYP_REGISTER 0x80A2
+#define XTYP_UNREGISTER 0x80D2
+#define XTYP_XACT_COMPLETE 0x8080
+#define TIMEOUT_ASYNC 0xFFFFFFFF
+
+/* Processes (INTERNET.CPP launching WChat). CreateProcess fails. */
+typedef struct _STARTUPINFO {
+	DWORD cb; LPSTR lpReserved, lpDesktop, lpTitle; DWORD dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+	WORD wShowWindow, cbReserved2; LPBYTE lpReserved2; HANDLE hStdInput, hStdOutput, hStdError;
+} STARTUPINFO, *LPSTARTUPINFO;
+typedef struct _PROCESS_INFORMATION { HANDLE hProcess, hThread; DWORD dwProcessId, dwThreadId; } PROCESS_INFORMATION, *LPPROCESS_INFORMATION;
+#define STARTF_USESHOWWINDOW 0x00000001
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+int WINAPI WSAStartup(WORD version, LPWSADATA data);
+int WINAPI WSACleanup(void);
+int WINAPI WSAGetLastError(void);
+int WINAPI WSAAsyncSelect(SOCKET s, HWND wnd, UINT msg, long events);
+HANDLE WINAPI WSAAsyncGetHostByName(HWND wnd, UINT msg, const char *name, char *buf, int buflen);
+HANDLE WINAPI WSAAsyncGetHostByAddr(HWND wnd, UINT msg, const char *addr, int len, int type, char *buf, int buflen);
+int WINAPI WSACancelAsyncRequest(HANDLE request);
+int WINAPI closesocket(SOCKET s);
+UINT WINAPI DdeInitialize(LPDWORD inst, PFNCALLBACK callback, DWORD cmd, DWORD res);
+BOOL WINAPI DdeUninitialize(DWORD inst);
+HSZ WINAPI DdeCreateStringHandle(DWORD inst, LPCSTR str, int codepage);
+BOOL WINAPI DdeFreeStringHandle(DWORD inst, HSZ hsz);
+DWORD WINAPI DdeQueryString(DWORD inst, HSZ hsz, LPSTR buf, DWORD max, int codepage);
+HDDEDATA WINAPI DdeNameService(DWORD inst, HSZ s1, HSZ s2, UINT cmd);
+HCONV WINAPI DdeConnect(DWORD inst, HSZ service, HSZ topic, void *context);
+BOOL WINAPI DdeDisconnect(HCONV conv);
+HDDEDATA WINAPI DdeClientTransaction(LPBYTE data, DWORD len, HCONV conv, HSZ item, UINT fmt, UINT type, DWORD timeout, LPDWORD result);
+LPBYTE WINAPI DdeAccessData(HDDEDATA data, LPDWORD size);
+BOOL WINAPI DdeUnaccessData(HDDEDATA data);
+BOOL WINAPI DdeFreeDataHandle(HDDEDATA data);
+BOOL WINAPI CreateProcess(LPCSTR app, LPSTR cmd, LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta, BOOL inherit, DWORD flags, LPVOID env, LPCSTR dir, LPSTARTUPINFO si, LPPROCESS_INFORMATION pi);
+LONG WINAPI RegQueryValue(HKEY key, LPCSTR sub, LPSTR value, LONG *size);
+#ifdef __cplusplus
+}
+
+/* Winsock took int lengths where BSD sockets take socklen_t. */
+inline int getsockopt(SOCKET s, int level, int name, char *val, int *len)
+{ socklen_t l = (socklen_t)*len; int r = ::getsockopt((int)s, level, name, val, &l); *len = (int)l; return r; }
+inline int recvfrom(SOCKET s, char *buf, int len, int flags, struct sockaddr *from, int *fromlen)
+{ socklen_t l = (socklen_t)*fromlen; int r = (int)::recvfrom((int)s, buf, (size_t)len, flags, from, &l); *fromlen = (int)l; return r; }
+inline SOCKET accept(SOCKET s, struct sockaddr *addr, int *addrlen)
+{ socklen_t l = addrlen ? (socklen_t)*addrlen : 0; int r = ::accept((int)s, addr, addrlen ? &l : NULL); if (addrlen) *addrlen = (int)l; return (SOCKET)r; }
+#endif
+
+/*
+** webcandc platform hooks (src/platform). The "operating system" runs when
+** the game looks at the clock or pumps messages: WebCandC_Service() polls
+** input, fires due timeSetEvent callbacks, and every frame's worth of time
+** presents the primary surface and yields to the browser.
+*/
+#ifdef __cplusplus
+extern "C" {
+#endif
+void WebCandC_Init(void);
+void WebCandC_Service(void);
+void WebCandC_Yield(void);
+void WebCandC_Present(void);
+void WebCandC_Mark_Screen_Dirty(void);
+#ifdef __cplusplus
+}
+#endif
 
 #define CreateWindowA CreateWindow
 #define MessageBoxA MessageBox

@@ -1488,7 +1488,8 @@ TARGET TechnoClass::Greatest_Threat(ThreatType method) const
 		**	is NOT scanned since that layer will probably contain more bullets and animations
 		**	than aircraft.
 		*/
-		for (int index = 0; index < Aircraft.Count(); index++) {
+		int index;
+		for (index = 0; index < Aircraft.Count(); index++) {
 			TechnoClass * object = Aircraft.Ptr(index);
 
 			int value = 0;
@@ -3274,7 +3275,8 @@ void TechnoClass::Base_Is_Attacked(TechnoClass const *enemy)
 	** Loop through the infantry looking for those who are capable of going
 	** on a rescue mission.
 	*/
-	for (int index = 0; index < Infantry.Count() && desired > 0; index++) {
+	int index;
+	for (index = 0; index < Infantry.Count() && desired > 0; index++) {
 	 	InfantryClass * infantry = Infantry.Ptr(index);
 		if (infantry && infantry->Owner() == Owner()) {
 
@@ -3399,7 +3401,8 @@ void TechnoClass::Base_Is_Attacked(TechnoClass const *enemy)
 		** Sort the defenders by value, this doesn't take very long and will
 		** help the closest defenders to respond.
 		*/
-		for (int lp = 0; lp < count - 1; lp ++) {
+		int lp;
+		for (lp = 0; lp < count - 1; lp ++) {
 			for (int lp2 = lp + 1; lp2 < count; lp2++) {
 				if (value[lp] < value[lp2]) {
 

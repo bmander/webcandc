@@ -63,10 +63,8 @@ char *ultoa(unsigned long value, char *buf, int radix);
 void _splitpath(const char *path, char *drive, char *dir, char *fname, char *ext);
 void _makepath(char *path, const char *drive, const char *dir, const char *fname, const char *ext);
 long filelength(int fd);
-unsigned int _rotl(unsigned int value, int shift);
-unsigned int _rotr(unsigned int value, int shift);
-unsigned long _lrotl(unsigned long value, int shift);
-unsigned long _lrotr(unsigned long value, int shift);
+/* _rotl/_rotr/_lrotl/_lrotr are clang builtins under -fms-extensions. */
+void randomize(void);
 int kbhit(void);
 int getch(void);
 void delay(unsigned ms);

@@ -227,23 +227,23 @@ void Send_Statistics_Packet(void)
 		/*
 		** Bases (On/Off)
 		*/
-		stats.Add_Field(FIELD_BASES, MPlayerBases ? "ON" : "OFF");
+		stats.Add_Field(FIELD_BASES, (char *)(MPlayerBases ? "ON" : "OFF"));
 
 		/*
 		** Tiberium (On/Off)
 		*/
-		stats.Add_Field(FIELD_TIBERIUM, MPlayerTiberium ? "ON" : "OFF");
+		stats.Add_Field(FIELD_TIBERIUM, (char *)(MPlayerTiberium ? "ON" : "OFF"));
 
 		/*
 		** Crates (On/Off)
 		*/
-		stats.Add_Field(FIELD_CRATES, MPlayerGoodies ? "ON" : "OFF");
+		stats.Add_Field(FIELD_CRATES, (char *)(MPlayerGoodies ? "ON" : "OFF"));
 
 		/*
 		** AI Players (On/Off/Capture the flag)
 		*/
-		stats.Add_Field(FIELD_AI_PLAYERS, MPlayerGhosts ? "ON" : "OFF");
-		stats.Add_Field(FIELD_CAPTURE_THE_FLAG, Special.IsCaptureTheFlag ? "ON" : "OFF");
+		stats.Add_Field(FIELD_AI_PLAYERS, (char *)(MPlayerGhosts ? "ON" : "OFF"));
+		stats.Add_Field(FIELD_CAPTURE_THE_FLAG, (char *)(Special.IsCaptureTheFlag ? "ON" : "OFF"));
 
 		/*
 		** Start unit count
@@ -420,6 +420,7 @@ void Send_Statistics_Packet(void)
 		char path_to_exe[280];
 		FILETIME write_time;		//File time is 64 bits
 
+#ifndef WEBCANDC
 		GetModuleFileName (ProgramInstance, path_to_exe, 280);
 		RawFileClass file;
 		file.Set_Name(path_to_exe);
@@ -433,6 +434,11 @@ void Send_Statistics_Packet(void)
 				stats.Add_Field (FIELD_GAME_BUILD_DATE, (void*)&write_time, sizeof (write_time));
 			}
 		}
+#else
+		write_time.dwLowDateTime = 0;		// webcandc: no exe file handle; send a zero build date
+		write_time.dwHighDateTime = 0;
+		stats.Add_Field (FIELD_GAME_BUILD_DATE, (void*)&write_time, sizeof (write_time));
+#endif
 
 		/*
 		** Covert installed? (Yes/No)

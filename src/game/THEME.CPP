@@ -510,7 +510,8 @@ ThemeType ThemeClass::From_Name(char const * name)
 		**	First search for an exact name match with the filename
 		**	of the theme. This is guaranteed to be unique.
 		*/
-		for (ThemeType theme = THEME_FIRST; theme < THEME_COUNT; theme++) {
+		ThemeType theme;
+		for (theme = THEME_FIRST; theme < THEME_COUNT; theme++) {
 			if (stricmp(_themes[theme].Name, name) == 0) {
 				return(theme);
 			}

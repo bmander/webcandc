@@ -145,7 +145,7 @@ template<class T, class U> auto MAX(T a, U b) -> decltype(a + b)
 
 
 // Inline Routines
-//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+//ÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍ
 //
 // These Template functions are generally used
 // by classes when they havce over loaded > and <.

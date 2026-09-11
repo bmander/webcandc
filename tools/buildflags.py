@@ -21,6 +21,7 @@ CXXFLAGS = [
     "-fwrapv",
     "-fsigned-char",
     "-fms-extensions",
+    "-sUSE_SDL=2",
     "-Wno-everything",
     "-include", "src/compat/prelude.h",
     "-DTRUE_FALSE_DEFINED",
@@ -31,10 +32,9 @@ CXXFLAGS = [
 ]
 
 # Files from the original MAKEFILE that we compile out entirely (DOS/IPX/modem/DDE).
-GAME_EXCLUDE = {
-    "WINASM", "IPX", "IPX95", "IPXADDR", "IPXCONN", "IPXGCONN", "IPXMGR", "NULLDLG",
-    "NULLCONN", "NULLMGR", "NOSEQCON", "TCPIP", "CCDDE", "DDE", "INTERNET",
-}
+# Only the Greenleaf serial/modem code: IPX, Winsock and DDE compile against the
+# platform layer, which reports "no network" so the game disables those modes.
+GAME_EXCLUDE = {"WINASM", "NULLDLG", "NULLCONN", "NULLMGR"}
 
 # Object list from src/game/MAKEFILE (OBJECTS), minus assembly objects.
 GAME_OBJECTS = """SUPER AADATA WINSTUB WINASM ABSTRACT ADATA AIRCRAFT ANIM AUDIO BASE BBDATA BDATA
@@ -49,10 +49,12 @@ REINF SAVELOAD SCENARIO SCORE SCROLL SDATA SHAPEBTN SIDEBAR SLIDER SMUDGE SOUNDD
 TAB TARCOM TARGET TCPIP TDATA TEAM TEAMTYPE TECHNO TEMPLATE TERRAIN TEXTBTN THEME TOGGLE TRIGGER
 TURRET TXTLABEL UDATA UNIT VECTOR VISUDLG UTRACKER PACKET FIELD STATS CCDDE DDE""".split()
 
-# Engine files compiled by the Remastered TIBERIANDAWN.VCXPROJ, minus platform files we replace.
-WWLIB_SOURCES = """ALLOC BUFFER BUFFGLBL DIPTHONG DrawMisc DRAWRECT FONT GBUFFER GETSHAPE ICONSET
-IFF IRANDOM KEYBOARD LOAD LOADFONT LOADPAL MEM MORPHPAL MOUSEWW NEWDEL PALETTE REGIONSZ SET_FONT
-TIMER TIMERDWN TIMERINI WINHIDE WRITEPCX WSA _DIPTABL""".split()
+# Game files the MAKEFILE took from the Westwood library, plus C++ replacements
+# for the game's .ASM files.
+GAME_ADDED = ["RAWFILE", "MONOC", "MISCASM", "KEYFBUFF", "TXTPRNT", "WINASM"]
+
+# Every engine source is compiled (the Remastered project's list, plus the
+# C++ ports of its assembly that live alongside).
 
 
 def _find(d, stem):
@@ -67,8 +69,10 @@ def sources(group="all"):
     out = []
     if group in ("game", "all"):
         out += [_find("src/game", s) for s in GAME_OBJECTS if s not in GAME_EXCLUDE]
+        out += [p for p in (ROOT / "src/game" / (s + ".CPP") for s in GAME_ADDED) if p.exists()]
     if group in ("wwlib", "all"):
-        out += [_find("src/wwlib", s) for s in WWLIB_SOURCES]
+        out += sorted(p for p in (ROOT / "src/wwlib").iterdir() if p.suffix in (".CPP", ".cpp"))
     if group in ("platform", "all"):
         out += sorted((ROOT / "src/platform").glob("*.cpp"))
+        out += sorted((ROOT / "src/compat").glob("*.cpp"))
     return out

@@ -497,7 +497,8 @@ void Do_Win(void)
 	**	applies to GDI mission #7.
 	*/
 	if (SabotagedType != STRUCT_NONE && Scenario == 7 && PlayerPtr->Class->House == HOUSE_GOOD) {
-		for (int index = 0; index < Buildings.Count(); index++) {
+		int index;
+		for (index = 0; index < Buildings.Count(); index++) {
 			BuildingClass * building = Buildings.Ptr(index);
 
 			if (building && !building->IsInLimbo && building->House != PlayerPtr && building->Class->Type == SabotagedType) {

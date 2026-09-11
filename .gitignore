@@ -3,3 +3,4 @@ tools/emsdk/
 build*/
 data/
 .DS_Store
+__pycache__/

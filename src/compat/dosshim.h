@@ -73,6 +73,11 @@ unsigned inpw(unsigned port);
 unsigned outp(unsigned port, unsigned value);
 unsigned outpw(unsigned port, unsigned value);
 
+unsigned _dos_open(const char *path, unsigned mode, int *handle);
+unsigned _dos_creat(const char *path, unsigned attr, int *handle);
+unsigned _dos_close(int handle);
+unsigned _dos_read(int handle, void *buf, unsigned count, unsigned *bytes);
+unsigned _dos_write(int handle, void const *buf, unsigned count, unsigned *bytes);
 unsigned _dos_findfirst(const char *path, unsigned attr, struct find_t *buf);
 unsigned _dos_findnext(struct find_t *buf);
 unsigned _dos_findclose(struct find_t *buf);

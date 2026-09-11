@@ -428,7 +428,7 @@ template<class T>
 int DynamicVectorClass<T>::Resize(unsigned newsize, T const * array)
 {
 	if (VectorClass<T>::Resize(newsize, array)) {
-		if (Length() < ActiveCount) ActiveCount = Length();
+		if (this->Length() < ActiveCount) ActiveCount = this->Length();
 		return(true);
 	}
 	return(false);
@@ -483,9 +483,9 @@ int DynamicVectorClass<T>::ID(T const & object)
 template<class T>
 int DynamicVectorClass<T>::Add(T const & object)
 {
-	if (ActiveCount >= Length()) {
-		if ((IsAllocated || !VectorMax) && GrowthStep > 0) {
-			if (!Resize(Length() + GrowthStep)) {
+	if (ActiveCount >= this->Length()) {
+		if ((this->IsAllocated || !this->VectorMax) && GrowthStep > 0) {
+			if (!Resize(this->Length() + GrowthStep)) {
 
 				/*
 				**	Failure to increase the size of the vector is an error condition.
@@ -514,9 +514,9 @@ int DynamicVectorClass<T>::Add(T const & object)
 template<class T>
 int DynamicVectorClass<T>::Add_Head(T const & object)
 {
-	if (ActiveCount >= Length()) {
-		if ((IsAllocated || !VectorMax) && GrowthStep > 0) {
-			if (!Resize(Length() + GrowthStep)) {
+	if (ActiveCount >= this->Length()) {
+		if ((this->IsAllocated || !this->VectorMax) && GrowthStep > 0) {
+			if (!Resize(this->Length() + GrowthStep)) {
 
 				/*
 				**	Failure to increase the size of the vector is an error condition.
@@ -895,4 +895,37 @@ void BooleanVectorClass::Fixup(int index) const
 	}
 }
 
-
+#ifdef WEBCANDC
+/*
+**	webcandc: explicit instantiations. Watcom instantiated template members from
+**	this file for every type the game used; standard C++ needs them spelled out.
+*/
+template class VectorClass<BaseNodeClass>;
+template class VectorClass<CellClass>;
+template class VectorClass<char const *>;
+template class VectorClass<char *>;
+template class VectorClass<char>;
+template class VectorClass<FileEntryClass *>;
+template class VectorClass<int>;
+template class VectorClass<NodeNameTag *>;
+template class VectorClass<ObjectClass *>;
+template class VectorClass<PhoneEntryClass *>;
+template class VectorClass<TriggerClass *>;
+template class VectorClass<unsigned char>;
+template class VectorClass<void *>;
+template class DynamicVectorClass<BaseNodeClass>;
+template class DynamicVectorClass<char const *>;
+template class DynamicVectorClass<char *>;
+template DynamicVectorClass<char>::DynamicVectorClass(unsigned, char const *);
+template int DynamicVectorClass<char>::Add(char const &);
+template int DynamicVectorClass<char>::Delete(int);
+template class DynamicVectorClass<FileEntryClass *>;
+/* int and char: Delete(T const &) and Delete(int) collide, so only the members the game uses. */
+template DynamicVectorClass<int>::DynamicVectorClass(unsigned, int const *);
+template int DynamicVectorClass<int>::Add(int const &);
+template class DynamicVectorClass<NodeNameTag *>;
+template class DynamicVectorClass<ObjectClass *>;
+template class DynamicVectorClass<PhoneEntryClass *>;
+template class DynamicVectorClass<TriggerClass *>;
+template class DynamicVectorClass<void *>;
+#endif

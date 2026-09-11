@@ -63,8 +63,10 @@
 #include	"compat.h"
 #include	"rawfile.h"
 
+#ifndef WEBCANDC	// webcandc: the game declares these as GraphicViewPortClass
 extern GraphicBufferClass	SeenBuff;
 extern GraphicBufferClass	HidPage;
+#endif
 
 /***********************************************************************************************
  * RawFileClass::Error -- Handles displaying a file error message.                             *
@@ -115,6 +117,16 @@ void RawFileClass::Error(int error, int canretry, char const * filename)
 //BG: Borland only	strcat(message, _sys_errlist[error]);
 	strcat(message, strerror(error) );
 	strcat(message, ". ");
+#ifdef WEBCANDC
+	/*
+	**	webcandc: there is no text mode to fall back to, and a retry prompt (the
+	**	CD-swap case) can't be satisfied in a browser. Report the error and stop.
+	*/
+	MessageBox(NULL, message, "Command & Conquer", MB_OK);
+	canretry = canretry;
+	Prog_End();
+	exit(EXIT_FAILURE);
+#else
 
 	/*
 	**	If it can't properly handle displaying the error message in the
@@ -281,6 +293,7 @@ void RawFileClass::Error(int error, int canretry, char const * filename)
 		Set_Logic_Page(oldpage);
 		FontXSpacing = oldspacing;
 	}
+#endif	// WEBCANDC
 }
 
 
@@ -309,6 +322,7 @@ RawFileClass::RawFileClass(char const *filename) :
 }
 
 
+#ifndef WEBCANDC	// webcandc: wwlib/RAWFILE.H (the RawFileClass the game is built against) defines this inline
 RawFileClass::~RawFileClass(void) 
 {
 	if (Allocated && Filename) {
@@ -317,6 +331,7 @@ RawFileClass::~RawFileClass(void)
 	Allocated = false; 
 	Filename = 0;
 }
+#endif
 
 
 /***********************************************************************************************
@@ -1087,3 +1102,13 @@ int RawFileClass::Delete(void)
 	*/
 	return(true);
 }
+
+
+#ifdef WEBCANDC
+/*
+**	webcandc: wwlib/RAWFILE.H declares this; the game's file I/O is unbuffered here.
+*/
+void RawFileClass::Set_Buffer_Size(int)
+{
+}
+#endif

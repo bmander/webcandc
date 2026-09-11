@@ -65,7 +65,7 @@
 /*
 ** Nasty globals
 */
-BOOL					Server;			//Is this player acting as client or server
+bool					Server;			// webcandc: bool, matching TCPIP.H			//Is this player acting as client or server
 TcpipManagerClass	Winsock;			//The object for interfacing with Winsock
 
 

@@ -27,6 +27,19 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/timeb.h>
+#include <sys/time.h>
+#include <dirent.h>
+#include <fnmatch.h>
+#include <signal.h>
+#include <setjmp.h>
+#include <locale.h>
+#include <wchar.h>
+#include <memory.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 
 #ifdef __cplusplus
 #include <new>
@@ -39,6 +52,12 @@
 #include <ctime>
 #include <cmath>
 #include <algorithm>
+#include <vector>
+#include <deque>
+#include <string>
+#include <memory>
+#include <utility>
+#include <type_traits>
 #endif
 
 #include "watcomlib.h"
@@ -54,5 +73,17 @@
 #endif
 
 #include <arpa/inet.h>	/* htons/ntohl, which Win32 got from <winsock.h> */
+
+/*
+** Westwood's structures describe file formats (shapes, MIX headers, palettes,
+** save games) and were built with byte packing -- Watcom's default, kept as
+** /Zp1 by the Remastered project. Everything from here on is packed; all
+** system headers are already included above with their natural layout.
+** Platform code that pulls in SDL/Emscripten headers later must wrap them in
+** WEBCANDC_SYSTEM_HEADERS_BEGIN/END.
+*/
+#pragma pack(push, 1)
+#define WEBCANDC_SYSTEM_HEADERS_BEGIN _Pragma("pack(push, 8)")
+#define WEBCANDC_SYSTEM_HEADERS_END _Pragma("pack(pop)")
 
 #endif

@@ -91,7 +91,8 @@ bool Do_Reinforcements(TeamTypeClass *teamtype)
 	bool watertransport = false;			// Transport needs a beach to land at?
 	bool onlytransport = true;				// Just transport is in reinforcement?
 	bool hastransport = false;				// Group comes with transport?
-	for (int index=0; index < teamtype->ClassCount; index++) {
+	int index;
+	for (index=0; index < teamtype->ClassCount; index++) {
 		if (teamtype->Class[index]->IsTransporter || teamtype->Class[index]->What_Am_I() == RTTI_AIRCRAFTTYPE) {
 			hastransport = true;
 			if (teamtype->Class[index]->What_Am_I() == RTTI_AIRCRAFTTYPE) {
@@ -300,7 +301,8 @@ bool Do_Reinforcements(TeamTypeClass *teamtype)
 					**	Could not unlimbo at location specified so find an adjacent location that it can
 					**	be unlimboed at. If this fails, then abort the whole placement process.
 					*/
-					for (FacingType adj = FACING_N; adj < FACING_COUNT; adj++) {
+					FacingType adj;
+					for (adj = FACING_N; adj < FACING_COUNT; adj++) {
 						CELL trycell = Adjacent_Cell(newcell, adj);
 						if (!Map.In_Radar(trycell) && object->Can_Enter_Cell(trycell, adj) == MOVE_OK) {
 							newcell = trycell;
@@ -587,7 +589,8 @@ int Create_Air_Reinforcement(HouseClass *house, AircraftType air, int number, Mi
 	** Loop through the number of objects we are supposed to create and
 	** 	create and place them on the map.
 	*/
-	for (int sub = 0; sub < number; sub++) {
+	int sub;
+	for (sub = 0; sub < number; sub++) {
 
 		/*
 		** Create one of the required objects.  If this fails we could have

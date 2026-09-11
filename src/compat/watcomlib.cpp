@@ -5,7 +5,9 @@
 #include "watcomlib.h"
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -129,9 +131,6 @@ long filelength(int fd)
 	return (long)st.st_size;
 }
 
-unsigned int _rotl(unsigned int v, int s) { s &= 31; return s ? (v << s) | (v >> (32 - s)) : v; }
-unsigned int _rotr(unsigned int v, int s) { s &= 31; return s ? (v >> s) | (v << (32 - s)) : v; }
-unsigned long _lrotl(unsigned long v, int s) { return _rotl((unsigned)v, s); }
-unsigned long _lrotr(unsigned long v, int s) { return _rotr((unsigned)v, s); }
+void randomize(void) { srand((unsigned)time(NULL)); }
 
 }

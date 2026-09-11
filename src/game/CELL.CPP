@@ -691,7 +691,8 @@ void CellClass::Overlap_Down(ObjectClass * object)
 	ObjectClass **ptr = 0;
 
 	if (!object) return;
-	for (int index = 0; index < sizeof(Overlapper)/sizeof(Overlapper[0]); index++) {
+	int index;
+	for (index = 0; index < sizeof(Overlapper)/sizeof(Overlapper[0]); index++) {
 		if (Overlapper[index] == object) return;
 		if (!Overlapper[index]) ptr = &Overlapper[index];
 	}
@@ -1934,7 +1935,7 @@ bool CellClass::Goodie_Check(FootClass * object)
 				}
 
 				while (what == -1) {
-					what = _what[Random_Pick((unsigned)0, sizeof(_what)/sizeof(_what[0])-1)];
+					what = _what[Random_Pick((unsigned)0, (unsigned)(sizeof(_what)/sizeof(_what[0])-1))];	// webcandc: size_t is unsigned long on wasm32
 
 					if (what == REVEAL && object->House->IsVisionary) what = -1;
 					if (what == AIR_STRIKE && object->House->AirStrike.Is_Present()) what = -1;
@@ -2076,7 +2077,7 @@ bool CellClass::Goodie_Check(FootClass * object)
 							INFANTRY_E7,
 							INFANTRY_RAMBO
 						};
-						InfantryTypeClass::As_Reference(_inf[Random_Pick((unsigned)0, sizeof(_inf)/sizeof(_inf[0])-1)]).Create_And_Place(Cell_Number(), object->Owner());
+						InfantryTypeClass::As_Reference(_inf[Random_Pick((unsigned)0, (unsigned)(sizeof(_inf)/sizeof(_inf[0])-1))]).Create_And_Place(Cell_Number(), object->Owner());	// webcandc: size_t is unsigned long on wasm32
 					}
 					return(false);
 

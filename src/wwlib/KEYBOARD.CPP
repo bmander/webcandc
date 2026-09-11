@@ -312,8 +312,7 @@ extern "C" {
 //#pragma off(unreferenced)
 void WWKeyboardClass::Message_Handler(HWND , UINT message, UINT wParam, LONG lParam)
 {
-	return;
-#if (0)	//   ST - 12/20/2018 11:27AM
+	// webcandc: restored the 1995 body the Remaster stubbed out (ST - 12/20/2018).
 	switch (message) {
 		case WM_SYSKEYDOWN:
 		case WM_KEYDOWN:
@@ -387,7 +386,6 @@ void WWKeyboardClass::Message_Handler(HWND , UINT message, UINT wParam, LONG lPa
 				SetCursor(CurrentCursor);
 			break;
 	}
-#endif
 }
 //#pragma on(unreferenced)
 

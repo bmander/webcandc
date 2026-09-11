@@ -450,9 +450,7 @@ void Check_Overlapped_Blit_Capability(void)
  *=============================================================================================*/
 BOOL Set_Video_Mode(HWND hwnd, int w, int h, int bits_per_pixel)
 {
-// ST - 1/3/2019 10:41AM
-	return TRUE;
-#if (0)
+	// webcandc: restored the 1995 body the Remaster stubbed out (ST - 1/3/2019).
 	HRESULT result;
 	//
 	// If there is not currently a direct draw object then we need to define one.
@@ -531,7 +529,6 @@ BOOL Set_Video_Mode(HWND hwnd, int w, int h, int bits_per_pixel)
 	//MessageBox(MainWindow, "In Set_Video_Mode. About to return success.","Note", MB_ICONEXCLAMATION|MB_OK);
 
 	return (TRUE);
-#endif
 }
 
 /***********************************************************************************************
