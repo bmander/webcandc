@@ -1,5 +1,28 @@
 # webcandc — porting the original C&C (1995) source to WebAssembly
 
+## Status (2026-09-11)
+
+| Milestone | State |
+|---|---|
+| M1 everything compiles | done — 200 translation units, wasm32 |
+| M2 links, runs headless | done — node harness (`tools/build.py --headless`, frame dumps, scripted input, stack traces) |
+| M3 menu in the browser | done — side-selection screen in Chrome |
+| M4 GDI mission 1, no sound | done — mission plays; selection/mouse work in Chrome |
+| M5 audio | done — Westwood SOUNDIO on DirectSound-over-SDL (browser device path untested) |
+| M6 movies | in progress — WINVQ player port |
+| M7 ship | in progress — player build (`--release --no-data`) asks for the freeware disc image and keeps data in IndexedDB |
+
+Things learned along the way (beyond the original risk list):
+- The Remastered WIN32LIB had video mode, keyboard handler and mouse drawing stubbed out; restored from the 1995 bodies left under `#if 0`.
+- Watcom enum sizing matters: game code is built with `-fshort-enums` (SDL-facing files excepted).
+- Tiberian Dawn windows are in 8-pixel units; the Remastered GBUFFER.H assumed Red Alert's pixel units.
+- The OpenRA data package lacks the Win95 fonts (UPDATE.MIX); the disc's INSTALL/SETUP.Z (InstallShield 3) holds them.
+
+Known issues:
+- Tooltip boxes lose their first glyph and leave remnants (map-cell refresh around help text).
+- Nod-campaign movies live on the Nod disc (a second MOVIES.MIX); only the GDI disc is supported so far.
+- Multiplayer is off (IPX/Winsock/DDE report no network).
+
 **Approach B:** start from EA's original GPL release of Tiberian Dawn and keep it as the base.
 Where Vanilla Conquer (VC) has already solved a problem (assembly rewrites, SDL backends,
 decoders), use its code as a reference rather than inventing new solutions.
