@@ -1,5 +1,13 @@
 // webcandc: JavaScript helpers linked with --js-library.
 addToLibrary({
+  // Headless (node) harness: contents of the $WEBCANDC_SCRIPT input script,
+  // as a malloc'd C string (or 0 when there is none).
+  webcandc_read_script: function () {
+    if (typeof process === 'undefined' || !process.env.WEBCANDC_SCRIPT) return 0;
+    return stringToNewUTF8(require('fs').readFileSync(process.env.WEBCANDC_SCRIPT, 'utf8'));
+  },
+  webcandc_read_script__deps: ['$stringToNewUTF8'],
+
   // Headless (node) harness: write an RGBA frame as $WEBCANDC_FRAMES/frame_NNNN.ppm.
   webcandc_dump_frame: function (rgba, w, h, n) {
     if (typeof process === 'undefined' || !process.env.WEBCANDC_FRAMES) return;

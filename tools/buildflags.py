@@ -1,4 +1,5 @@
 """Shared compiler flags and source lists for tools/check.py (mirrors CMakeLists.txt)."""
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,6 +67,14 @@ def _find(d, stem):
 
 
 def sources(group="all"):
+    """Every translation unit in the build. $WEBCANDC_EXCLUDE (comma-separated
+    stems) leaves files out, e.g. while a port of them is in progress."""
+    skip = {x.strip().upper() for x in os.environ.get("WEBCANDC_EXCLUDE", "").split(",") if x.strip()}
+    out = _sources(group)
+    return [p for p in out if p.stem.upper() not in skip]
+
+
+def _sources(group="all"):
     out = []
     if group in ("game", "all"):
         out += [_find("src/game", s) for s in GAME_OBJECTS if s not in GAME_EXCLUDE]

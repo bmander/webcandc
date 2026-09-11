@@ -81,6 +81,31 @@
  *=============================================================================================*/
 void CCFileClass::Error(int , int , char const * )
 {
+#ifdef WEBCANDC
+	/*
+	**	webcandc: a missing file used to mean "put the CD back in". With the
+	**	data on a virtual disk the retry below can never succeed, and spinning
+	**	on it would freeze the browser tab. Report it, give the browser a
+	**	frame, and stop after a few attempts.
+	*/
+	{
+		static char last_name[_MAX_PATH];
+		static int attempts;
+		if (strcmp(last_name, File_Name() ? File_Name() : "")) {
+			strncpy(last_name, File_Name() ? File_Name() : "", sizeof(last_name) - 1);
+			attempts = 0;
+		}
+		fprintf(stderr, "[file] required file missing: %s\n", last_name);
+		WebCandC_Yield();
+		if (++attempts >= 3) {
+			char message[_MAX_PATH + 64];
+			sprintf(message, "Required data file is missing: %s", last_name);
+			MessageBox(NULL, message, "Command & Conquer", MB_OK | MB_ICONSTOP);
+			Prog_End();
+			exit(EXIT_FAILURE);
+		}
+	}
+#endif
 #ifdef DEMO
 	if (strstr(File_Name(), "\\")) {
 		if (!Force_CD_Available(-1)) {

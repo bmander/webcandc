@@ -362,9 +362,102 @@ static void Translate_SDL_Event(SDL_Event const &e)
 	}
 }
 
+#ifdef WEBCANDC_HEADLESS
+/*
+** Test harness input: $WEBCANDC_SCRIPT names a file of timed events, one per
+** line, time in milliseconds since start:
+**     3000 key RETURN        press and release a key (A-Z, 0-9, or a name below)
+**     5000 click 320 200     left click at game coordinates
+**     5200 rclick 320 200    right click
+**     6000 move 100 100      move the mouse
+**     9000 exit              end the run
+*/
+extern "C" char *webcandc_read_script(void);	// library_webcandc.js
+
+struct ScriptEvent {
+	double Time;
+	UINT Message;
+	WPARAM WParam;
+	int X, Y;
+	bool Exit;
+};
+static std::vector<ScriptEvent> Script;
+static size_t ScriptPos = 0;
+static bool ScriptLoaded = false;
+
+static int Script_Key(char const *name)
+{
+	static const struct { char const *Name; int VK; } names[] = {
+		{"RETURN", VK_RETURN}, {"ENTER", VK_RETURN}, {"ESCAPE", VK_ESCAPE}, {"ESC", VK_ESCAPE},
+		{"SPACE", VK_SPACE}, {"TAB", VK_TAB}, {"BACK", VK_BACK}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT},
+		{"UP", VK_UP}, {"DOWN", VK_DOWN}, {"HOME", VK_HOME}, {"END", VK_END}, {"SHIFT", VK_SHIFT},
+		{"CTRL", VK_CONTROL}, {"ALT", VK_MENU},
+	};
+	if (name[0] && !name[1]) return toupper((unsigned char)name[0]);
+	if (name[0] == 'F' && name[1] >= '1' && name[1] <= '9') return VK_F1 + atoi(name + 1) - 1;
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) if (!strcmp(names[i].Name, name)) return names[i].VK;
+	return 0;
+}
+
+static void Load_Script(void)
+{
+	ScriptLoaded = true;
+	char *text = webcandc_read_script();
+	if (!text) return;
+	for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+		double t;
+		char action[16], arg[32];
+		int x = 0, y = 0;
+		if (sscanf(line, "%lf %15s", &t, action) < 2) continue;
+		ScriptEvent e = {t, 0, 0, 0, 0, false};
+		if (!strcmp(action, "key") && sscanf(line, "%*f %*s %31s", arg) == 1) {
+			int vk = Script_Key(arg);
+			e.Message = WM_KEYDOWN; e.WParam = vk; Script.push_back(e);
+			e.Time += 80; e.Message = WM_KEYUP; Script.push_back(e);
+		} else if ((!strcmp(action, "click") || !strcmp(action, "rclick") || !strcmp(action, "move")) && sscanf(line, "%*f %*s %d %d", &x, &y) == 2) {
+			e.X = x; e.Y = y;
+			e.Message = WM_MOUSEMOVE; Script.push_back(e);
+			if (strcmp(action, "move")) {
+				bool right = action[0] == 'r';
+				e.Time += 30; e.Message = right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN; Script.push_back(e);
+				e.Time += 80; e.Message = right ? WM_RBUTTONUP : WM_LBUTTONUP; Script.push_back(e);
+			}
+		} else if (!strcmp(action, "exit")) {
+			e.Exit = true; Script.push_back(e);
+		}
+	}
+	free(text);
+	fprintf(stderr, "[script] %zu events\n", Script.size());
+}
+
+static void Post(UINT message, WPARAM w, LPARAM l);
+
+static void Run_Script(void)
+{
+	if (!ScriptLoaded) Load_Script();
+	double now = Now_Ms();
+	while (ScriptPos < Script.size() && Script[ScriptPos].Time <= now) {
+		ScriptEvent const &e = Script[ScriptPos++];
+		if (e.Exit) {
+			fprintf(stderr, "[script] exit at %.1fs\n", now / 1000.0);
+			emscripten_force_exit(0);
+		}
+		if (e.Message == WM_KEYDOWN || e.Message == WM_KEYUP) {
+			KeyDown[e.WParam & 0xFF] = (e.Message == WM_KEYDOWN);
+			Post(e.Message, e.WParam, e.Message == WM_KEYUP ? (LPARAM)0xC0000001 : 1);
+		} else {
+			MouseX = e.X;
+			MouseY = e.Y;
+			Post(e.Message, 0, MAKELONG(e.X, e.Y));
+		}
+	}
+}
+#endif
+
 static void Pump_SDL(void)
 {
 #ifdef WEBCANDC_HEADLESS
+	Run_Script();
 	return;
 #endif
 	SDL_Event e;

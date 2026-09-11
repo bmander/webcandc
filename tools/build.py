@@ -72,6 +72,9 @@ def compile_one(args):
     return src, p.returncode, p.stderr
 
 
+WITH_MOVIES = False
+
+
 def stage_data(stage):
     pkg = ROOT / "data" / "pkg"
     stage.mkdir(parents=True, exist_ok=True)
@@ -81,11 +84,28 @@ def stage_data(stage):
     ini = ROOT / "web" / "CONQUER.INI"	# stands in for the one SETUP.EXE wrote
     if ini.exists():
         shutil.copy2(ini, stage / "CONQUER.INI")
-    for f in pkg.iterdir():
-        if f.is_file():
-            dst = stage / f.name.upper()
-            if not dst.exists() or dst.stat().st_mtime < f.stat().st_mtime:
-                shutil.copy2(f, dst)
+    # data/cd (files extracted from the freeware C&C95 disc images) wins over
+    # data/pkg (the smaller DOS-edition package), file by file.
+    provided = set()
+    for src_dir in (ROOT / "data" / "cd", pkg):
+        if not src_dir.exists():
+            continue
+        for f in src_dir.iterdir():
+            if f.name.upper() in provided:
+                continue	# an earlier (preferred) source already has this file
+            provided.add(f.name.upper())
+            if f.is_file() and f.suffix.upper() in (".MIX", ".INI", ".ENG", ".VQA", ".AUD"):
+                dst = stage / f.name.upper()
+                # Movies (MOVIES.MIX is 449 MB, plus the SIZZLE previews) are only
+                # packaged on request until they are streamed on demand.
+                if not WITH_MOVIES and (dst.name == "MOVIES.MIX" or dst.suffix == ".VQA"):
+                    if dst.exists():
+                        dst.unlink()
+                    continue
+                if dst.name == "CONQUER.INI":
+                    continue
+                if not dst.exists() or dst.stat().st_mtime < f.stat().st_mtime or dst.stat().st_size != f.stat().st_size:
+                    shutil.copy2(f, dst)
 
 
 def main():
@@ -93,9 +113,12 @@ def main():
     ap.add_argument("--release", action="store_true")
     ap.add_argument("--headless", action="store_true", help="node test harness build")
     ap.add_argument("--undefined", action="store_true", help="report undefined symbols")
+    ap.add_argument("--with-movies", action="store_true", help="package MOVIES.MIX and the VQA previews")
     ap.add_argument("-j", type=int, default=os.cpu_count())
     a = ap.parse_args()
     config = "release" if a.release else ("headless" if a.headless else "debug")
+    global WITH_MOVIES
+    WITH_MOVIES = a.with_movies
     cfg = CONFIGS[config]
     out = ROOT / "build" / config
     objdir = out / "obj"
