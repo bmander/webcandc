@@ -10,7 +10,7 @@
 | M4 GDI mission 1, no sound | done — mission plays; selection/mouse work in Chrome |
 | M5 audio | done — Westwood SOUNDIO on DirectSound-over-SDL; Web Audio verified in Chrome |
 | M6 movies | done — WINVQ player; intro and GDI briefings play in Chrome with sound |
-| M7 ship | in progress — player build (`--release --no-data`) asks for the freeware disc image and keeps data in IndexedDB |
+| M7 ship | in progress — player build (`--release --no-data`) asks for the freeware disc image and keeps data in IndexedDB; verified in Chrome: GDI 1 → save → reload page → load → victory → score screen → campaign map → GDI 2 briefing and mission; 60 fps page, 3 long tasks in 4½ minutes (longest 153 ms, during loads) |
 
 Things learned along the way (beyond the original risk list):
 - The Remastered WIN32LIB had video mode, keyboard handler and mouse drawing stubbed out; restored from the 1995 bodies left under `#if 0`.
@@ -26,6 +26,7 @@ Things learned along the way (beyond the original risk list):
 Known issues:
 - Nod-campaign movies live on the Nod disc (a second MOVIES.MIX); only the GDI disc is supported so far.
 - Multiplayer is off (IPX/Winsock/DDE report no network).
+- The 1995 loops poll the timers between frames, so the game keeps one CPU core busy (headless: 54 s CPU in 60 s). The page stays responsive; idling with a real sleep in the timer shims would save battery.
 
 **Approach B:** start from EA's original GPL release of Tiberian Dawn and keep it as the base.
 Where Vanilla Conquer (VC) has already solved a problem (assembly rewrites, SDL backends,
