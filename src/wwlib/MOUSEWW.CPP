@@ -91,7 +91,7 @@ WWMouseClass::WWMouseClass(GraphicViewPortClass *scr, int mouse_max_width, int m
 	
 	// Add TIME_KILL_SYNCHRONOUS flag. ST - 2/13/2019 5:07PM
 	//TimerHandle = timeSetEvent( 1000/60 , 1 , ::Process_Mouse, 0 , TIME_PERIODIC);
-	//TimerHandle = timeSetEvent( 1000/60 , 1 , ::Process_Mouse, 0 , TIME_PERIODIC | TIME_KILL_SYNCHRONOUS);		// Removed. ST - 2/13/2019 5:12PM
+	TimerHandle = timeSetEvent( 1000/60 , 1 , ::Process_Mouse, 0 , TIME_PERIODIC);	// webcandc: restored (the Remaster removed the cursor timer)
 
 	/*
 	** Force the windows mouse pointer to stay withing the graphic view port region
@@ -184,9 +184,6 @@ void WWMouseClass::Clear_Cursor_Clip(void)
 
 void WWMouseClass::Process_Mouse(void)
 {
-//ST - 1/3/2019 10:50AM	
-	return;
-#if (0)
 	POINT 	pt;					// define a structure to hold current cursor pos
 
 	//
@@ -255,18 +252,11 @@ void WWMouseClass::Process_Mouse(void)
 	// Allow other threads to lock the screen again
 	//
 	//Unblock_Mouse(Screen->Get_Graphic_Buffer());
-#endif
 }
 
 void *WWMouseClass::Set_Cursor(int xhotspot, int yhotspot, void *cursor)
 {
-//ST - 1/3/2019 10:50AM	
-	xhotspot;
-	yhotspot;
-	cursor;
-	return cursor;
 
-#if (0)
 	
 	//
 	// If the pointer to the cursor we got is invalid, or its the same as the
@@ -302,13 +292,10 @@ void *WWMouseClass::Set_Cursor(int xhotspot, int yhotspot, void *cursor)
 	// Asm_Set_Mouse_Cursor.
 	//
 	return(retval);
-#endif
 }
 
 void WWMouseClass::Low_Hide_Mouse()
 {
-//ST - 1/3/2019 10:50AM	
-#if (0)
 	if (!State) {
 		if (MouseBuffX != -1 || MouseBuffY != -1) {
 			if (Screen->Lock()){
@@ -319,7 +306,6 @@ void WWMouseClass::Low_Hide_Mouse()
 		MouseBuffX = -1;
 		MouseBuffY = -1;
 	}
-#endif
 	State++;
 }
 void WWMouseClass::Hide_Mouse()
@@ -341,8 +327,6 @@ void WWMouseClass::Low_Show_Mouse(int x, int y)
 	//
 	State--;
 
-//ST - 1/3/2019 10:50AM	
-#if (0)
 
 	//
 	//	If the mouse is completely visible then draw it at its current
@@ -372,7 +356,6 @@ void WWMouseClass::Low_Show_Mouse(int x, int y)
 			Screen->Unlock();
 		}
 	}
-#endif
 }
 
 void WWMouseClass::Show_Mouse()
@@ -474,10 +457,6 @@ void WWMouseClass::Conditional_Show_Mouse(void)
 
 void WWMouseClass::Draw_Mouse(GraphicViewPortClass *scr)
 {
-	scr;
-	return;
-//ST - 1/3/2019 10:50AM	
-#if (0)
 	
 	POINT pt;
 
@@ -528,16 +507,10 @@ void WWMouseClass::Draw_Mouse(GraphicViewPortClass *scr)
 	}
 
 	MouseUpdate--;
-#endif
 }
 
 void WWMouseClass::Erase_Mouse(GraphicViewPortClass *scr, int forced)
 {
-//ST - 1/3/2019 10:50AM	
-	scr;
-	forced;
-	return;
-#if (0)
 	//
 	// If we are forcing the redraw of a mouse we already managed to
 	// restore then just get outta here.
@@ -584,7 +557,6 @@ void WWMouseClass::Erase_Mouse(GraphicViewPortClass *scr, int forced)
 	}
 	MouseUpdate--;
   	EraseFlags = FALSE;
-#endif
 }
 
 int WWMouseClass::Get_Mouse_State(void)
