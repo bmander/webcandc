@@ -95,6 +95,17 @@ template<class T> T MAX(T a, T b)
 	return (b > a) ? b : a;
 };
 
+// webcandc: Watcom deduced MIN/MAX with mixed argument types (e.g. MAX(uchar, 1));
+// standard C++ does not. Compare in the usual-arithmetic-conversion type.
+template<class T, class U> auto MIN(T a, U b) -> decltype(a + b)
+{
+	return (b < a) ? b : a;
+}
+template<class T, class U> auto MAX(T a, U b) -> decltype(a + b)
+{
+	return (b > a) ? b : a;
+}
+
 // Returns the low word of a long
 #define	LOW_WORD(a)		((unsigned short)((long)(a) & 0x0000FFFFL))
 
@@ -134,7 +145,7 @@ template<class T> T MAX(T a, T b)
 
 
 // Inline Routines
-//ÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍ
+//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 //
 // These Template functions are generally used
 // by classes when they havce over loaded > and <.

@@ -63,8 +63,10 @@
 #include	<stdlib.h>
 #include	<stddef.h>
 
+#ifndef WEBCANDC	// Placement new comes from <new> in standard C++.
 inline void * operator new(size_t , void * pointer) {return(pointer);}
 inline void * operator new[](size_t , void * pointer) {return(pointer);}
+#endif
 
 
 /**************************************************************************

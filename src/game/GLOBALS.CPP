@@ -320,7 +320,7 @@ char ScenarioName[_MAX_FNAME+_MAX_EXT];	// name of scenario
 int CarryOverMoney;						// Carry over money from last scenario.
 int CarryOverPercent;					// Carry over money percentage control.
 int CarryOverCap;							// Maxmimum carry over money allowed.
-bool ScenarioInit;
+int ScenarioInit;	// webcandc: nesting counter; bool was int in 1995
 bool SpecialFlag = false;
 
 

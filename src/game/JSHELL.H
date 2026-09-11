@@ -75,23 +75,26 @@ inline void * operator delete[] (void * data)
 **	arithmatic performed. The operators must be instatiated for the
 **	enumerated types desired.
 */
-template<class T> inline T operator ++(T & a)
+// webcandc: restricted to enums (as intended above); unconstrained, standard C++
+// would also offer these to class types that lack their own ++/--.
+#define WEBCANDC_ENUM_ONLY(T) typename std::enable_if<std::is_enum<T>::value, T>::type
+template<class T> inline WEBCANDC_ENUM_ONLY(T) operator ++(T & a)
 {
 	a = (T)((int)a + (int)1);
 	return(a);
 }
-template<class T> inline T operator ++(T & a, int)
+template<class T> inline WEBCANDC_ENUM_ONLY(T) operator ++(T & a, int)
 {
 	T aa = a;
 	a = (T)((int)a + (int)1);
 	return(aa);
-}	
-template<class T> inline T operator --(T & a)
+}
+template<class T> inline WEBCANDC_ENUM_ONLY(T) operator --(T & a)
 {
 	a = (T)((int)a - (int)1);
 	return(a);
 }
-template<class T> inline T operator --(T & a, int)
+template<class T> inline WEBCANDC_ENUM_ONLY(T) operator --(T & a, int)
 {
 	T aa = a;
 	a = (T)((int)a - (int)1);

@@ -188,7 +188,7 @@ extern unsigned char *		OriginalPalette;
 extern int						EndCountDown;
 extern bool						GameActive;
 extern bool						SpecialFlag;
-extern bool						ScenarioInit;
+extern int						ScenarioInit;	// webcandc: nesting counter; bool was int in 1995
 extern long						TutorFlags[2];
 extern HouseClass *			PlayerPtr;
 extern unsigned char *		BlackPalette;

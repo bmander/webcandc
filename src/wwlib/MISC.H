@@ -206,7 +206,7 @@ void __cdecl Shake_Screen(int shakes);
 long __cdecl Reverse_Long(long number);
 short __cdecl Reverse_Short(short number);
 long __cdecl Swap_Long(long number);
-#if (0)
+#if (1)	// webcandc: re-enabled; the game calls these (C++ ports live in src/game/MISCASM.CPP)
 /*=========================================================================*/
 /* The following prototype is for the file: FACING8.ASM							*/
 /*=========================================================================*/

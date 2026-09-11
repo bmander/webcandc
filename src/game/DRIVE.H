@@ -131,7 +131,7 @@ class DriveClass : public FootClass
 			OUT_OF_WEAPON_FACTORY			// Track to leave weapons factory.
 		};
 
-	private:
+	public:	// webcandc: was private; Watcom let namespace-scope operators below use these types.
 
 		/****************************************************************************
 		**	Smooth turning tracks are controlled by this structure and these
