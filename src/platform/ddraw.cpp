@@ -11,6 +11,7 @@
 */
 WEBCANDC_SYSTEM_HEADERS_BEGIN
 #include <SDL2/SDL.h>
+#include <emscripten.h>
 WEBCANDC_SYSTEM_HEADERS_END
 #include <windows.h>
 #include <ddraw.h>
@@ -27,6 +28,8 @@ static SDL_Texture *Texture;
 static int ModeWidth = 640, ModeHeight = 400;
 static bool ScreenDirty = false;
 static unsigned int *RGBABuffer;
+
+extern "C" void webcandc_dump_frame(unsigned int const *rgba, int w, int h, int n);	// library_webcandc.js
 
 class WCPalette;
 class WCSurface;
@@ -379,9 +382,11 @@ static void Resize_Display(int w, int h)
 {
 	ModeWidth = w;
 	ModeHeight = h;
+#ifndef WEBCANDC_HEADLESS
 	if (Texture) SDL_DestroyTexture(Texture);
 	Texture = SDL_CreateTexture(Renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
 	SDL_RenderSetLogicalSize(Renderer, w, h);
+#endif
 	free(RGBABuffer);
 	RGBABuffer = (unsigned int *)calloc((size_t)w * h, sizeof(unsigned int));
 	ScreenDirty = true;
@@ -391,12 +396,17 @@ extern "C" void WebCandC_Mark_Screen_Dirty(void) { ScreenDirty = true; }
 
 extern "C" void WebCandC_Present(void)
 {
+#ifdef WEBCANDC_HEADLESS
+	if (!ScreenDirty || !PrimarySurface) return;
+#else
 	if (!ScreenDirty || !PrimarySurface || !Texture) return;
+#endif
 	ScreenDirty = false;
 
 	unsigned int lut[256];
 	for (int i = 0; i < 256; i++) {
-		PALETTEENTRY const &e = PrimarySurface->Palette ? PrimarySurface->Palette->Entries[i] : PrimarySurface->Palette->Entries[0];
+		if (!PrimarySurface->Palette) { lut[i] = 0xFF000000u | (i * 0x010101u); continue; }	// no palette yet: greyscale
+		PALETTEENTRY const &e = PrimarySurface->Palette->Entries[i];
 		lut[i] = 0xFF000000u | ((unsigned)e.peRed << 16) | ((unsigned)e.peGreen << 8) | (unsigned)e.peBlue;
 	}
 
@@ -408,14 +418,32 @@ extern "C" void WebCandC_Present(void)
 		for (int x = 0; x < w; x++) dst[x] = lut[src[x]];
 	}
 
+#ifdef WEBCANDC_HEADLESS
+	/*
+	** Headless (node) test harness: every WEBCANDC_FRAME_MS milliseconds of
+	** wall time, write the screen to $WEBCANDC_FRAMES/frame_NNNN.ppm.
+	*/
+	static double last_dump = -1e9;
+	static int frame_no = 0;
+	double now = emscripten_get_now();
+	if (now - last_dump >= 1000.0) {
+		last_dump = now;
+		webcandc_dump_frame(RGBABuffer, ModeWidth, ModeHeight, frame_no++);
+	}
+#else
 	SDL_UpdateTexture(Texture, NULL, RGBABuffer, ModeWidth * 4);
 	SDL_RenderClear(Renderer);
 	SDL_RenderCopy(Renderer, Texture, NULL, NULL);
 	SDL_RenderPresent(Renderer);
+#endif
 }
 
 extern "C" void WebCandC_Init(void)
 {
+#ifdef WEBCANDC_HEADLESS
+	Resize_Display(ModeWidth, ModeHeight);
+	return;
+#endif
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
 	SDL_SetHint(SDL_HINT_EMSCRIPTEN_KEYBOARD_ELEMENT, "#canvas");
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_TIMER) != 0) {

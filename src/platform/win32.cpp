@@ -223,6 +223,9 @@ extern "C" SHORT WINAPI VkKeyScan(CHAR ch)
 
 static int Mouse_Buttons_To_VK_Down(int vk)
 {
+#ifdef WEBCANDC_HEADLESS
+	return 0;
+#endif
 	Uint32 b = SDL_GetMouseState(NULL, NULL);
 	if (vk == VK_LBUTTON) return (b & SDL_BUTTON_LMASK) != 0;
 	if (vk == VK_RBUTTON) return (b & SDL_BUTTON_RMASK) != 0;
@@ -235,9 +238,11 @@ extern "C" short WINAPI GetKeyState(int vk)
 	vk &= 0xFF;
 	short state = 0;
 	if (KeyDown[vk] || Mouse_Buttons_To_VK_Down(vk)) state |= (short)0x8000;
+#ifndef WEBCANDC_HEADLESS
 	SDL_Keymod mod = SDL_GetModState();
 	if (vk == VK_CAPITAL && (mod & KMOD_CAPS)) state |= 1;
 	if (vk == VK_NUMLOCK && (mod & KMOD_NUM)) state |= 1;
+#endif
 	return state;
 }
 
@@ -359,6 +364,9 @@ static void Translate_SDL_Event(SDL_Event const &e)
 
 static void Pump_SDL(void)
 {
+#ifdef WEBCANDC_HEADLESS
+	return;
+#endif
 	SDL_Event e;
 	while (SDL_PollEvent(&e)) {
 		Translate_SDL_Event(e);
@@ -693,6 +701,16 @@ extern "C" void WebCandC_Service(void)
 
 extern "C" void WebCandC_Yield(void)
 {
+#ifdef WEBCANDC_HEADLESS
+	/*
+	** Test harness: every five seconds, show where the game is waiting.
+	*/
+	static double last_trace = 0;
+	if (Now_Ms() - last_trace >= 5000.0) {
+		last_trace = Now_Ms();
+		emscripten_log(EM_LOG_CONSOLE | EM_LOG_C_STACK, "[trace] t=%.1fs", Now_Ms() / 1000.0);
+	}
+#endif
 	WebCandC_Present();
 	LastYield = Now_Ms();
 	emscripten_sleep(0);

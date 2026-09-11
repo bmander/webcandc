@@ -86,6 +86,18 @@ static inline unsigned Font_Word(unsigned char const * ptr)
  *=========================================================================*/
 extern "C" LONG __cdecl Buffer_Print(void *this_object, const char *string, int x_pixel, int y_pixel, int fcolor, int bcolor)
 {
+#ifdef WEBCANDC_HEADLESS
+	/*
+	**	Test harness: log each distinct string as it is drawn.
+	*/
+	{
+		static char last[256];
+		if (string && strncmp(last, string, sizeof(last) - 1)) {
+			strncpy(last, string, sizeof(last) - 1);
+			fprintf(stderr, "[text] %s\n", string);
+		}
+	}
+#endif
 	GraphicViewPortClass * vp = (GraphicViewPortClass *)this_object;
 
 	/*

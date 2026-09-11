@@ -19,6 +19,12 @@ int main(int argc, char **argv)
 		strncat(command_line, argv[i], sizeof(command_line) - strlen(command_line) - 1);
 	}
 
+	/*
+	** No CD-ROM: point the game's own -CD<path> option (INIT.CPP) at the
+	** directory holding the data files, as the hard-disk install did.
+	*/
+	if (!command_line[0]) strcpy(command_line, "-CD.");
+
 	WebCandC_Init();
 	fprintf(stderr, "[webcandc] entering WinMain(\"%s\")\n", command_line);
 	int result = WinMain((HINSTANCE)1, NULL, command_line, SW_SHOWNORMAL);

@@ -358,9 +358,26 @@ extern	int	CachedIconsDrawn;
 extern	int	UnCachedIconsDrawn;
 
 
+extern "C" unsigned char ColorXlat[16][16];	// game/TXTPRNT.CPP (was in TXTPRNT.ASM)
+
+/*
+** webcandc: C++ port of the 1995 SETFPAL.ASM; the Remaster left this empty
+** because it drew text elsewhere. Sets font colours start..end (0-15) in
+** both halves of the nibble translation table Buffer_Print uses: row 0
+** (low nibble) and column 0 (high nibble).
+*/
 extern "C" void __cdecl Set_Font_Palette_Range(void const *palette, INT start_idx, INT end_idx)
 {
-}		  
+	unsigned char const *src = (unsigned char const *)palette;
+	int start = start_idx & 0x0F;
+	int end = end_idx & 0x0F;
+	if (end < start) return;
+	for (int i = start; i <= end; i++) {
+		unsigned char color = *src++;
+		ColorXlat[0][i] = color;
+		ColorXlat[i][0] = color;
+	}
+}
 
 
 /*

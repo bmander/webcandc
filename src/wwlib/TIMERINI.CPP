@@ -288,6 +288,14 @@ void WinTimerClass::Update_Tick_Count ( void )
 
 unsigned WinTimerClass::Get_System_Tick_Count ( void )
 {
+#ifdef WEBCANDC
+	/*
+	** webcandc: the "timer interrupt" runs when the game looks at the clock --
+	** fire due timeSetEvent callbacks (which advance these counters) and let the
+	** browser have a frame. Every 1995 wait loop reads the clock.
+	*/
+	WebCandC_Service();
+#endif
 	return ( SysTicks );
 }
 
@@ -308,5 +316,13 @@ unsigned WinTimerClass::Get_System_Tick_Count ( void )
 
 unsigned WinTimerClass::Get_User_Tick_Count ( void )
 {
+#ifdef WEBCANDC
+	/*
+	** webcandc: the "timer interrupt" runs when the game looks at the clock --
+	** fire due timeSetEvent callbacks (which advance these counters) and let the
+	** browser have a frame. Every 1995 wait loop reads the clock.
+	*/
+	WebCandC_Service();
+#endif
 	return ( UserTicks );
 }

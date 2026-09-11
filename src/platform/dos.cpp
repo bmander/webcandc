@@ -13,6 +13,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 
 extern "C" {
@@ -29,12 +31,28 @@ unsigned outp(unsigned, unsigned value) { return value; }
 unsigned outpw(unsigned, unsigned value) { return value; }
 
 /*
+** DOS paths ("C:\\DIR\\FILE.MIX", or the "-CD." search path's ".\\FILE.MIX")
+** become POSIX paths: drive letters dropped, backslashes turned into slashes.
+*/
+static const char *Posix_Path(const char *path, char *buf, size_t size)
+{
+	if (path[0] && path[1] == ':') path += 2;
+	size_t i = 0;
+	for (; path[i] && i < size - 1; i++) buf[i] = (path[i] == '\\') ? '/' : path[i];
+	buf[i] = '\0';
+	if (!buf[0]) { buf[0] = '.'; buf[1] = '\0'; }
+	return buf;
+}
+
+/*
 ** DOS file handles are POSIX descriptors. DOS file names are case-blind; the
 ** Emscripten file system is not, so a failed open retries the upper- and
 ** lower-cased spelling of the name before giving up.
 */
-static int Open_Case_Blind(const char *path, int flags, int mode)
+static int Open_Case_Blind(const char *dos_path, int flags, int mode)
 {
+	char pbuf[512];
+	const char *path = Posix_Path(dos_path, pbuf, sizeof(pbuf));
 	int fd = open(path, flags, mode);
 	if (fd >= 0 || (flags & O_CREAT)) return fd;
 	char alt[512];
@@ -46,6 +64,9 @@ static int Open_Case_Blind(const char *path, int flags, int mode)
 		fd = open(alt, flags, mode);
 		if (fd >= 0) return fd;
 	}
+#ifdef WEBCANDC_HEADLESS
+	fprintf(stderr, "[file] not found: %s\n", path);
+#endif
 	return -1;
 }
 
@@ -63,9 +84,10 @@ unsigned _dos_open(const char *path, unsigned mode, int *handle)
 	return 0;
 }
 
-unsigned _dos_creat(const char *path, unsigned, int *handle)
+unsigned _dos_creat(const char *dos_path, unsigned, int *handle)
 {
-	int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+	char pbuf[512];
+	int fd = open(Posix_Path(dos_path, pbuf, sizeof(pbuf)), O_RDWR | O_CREAT | O_TRUNC, 0666);
 	if (fd < 0) {
 		*handle = -1;
 		return errno ? (unsigned)errno : 5;
@@ -127,8 +149,10 @@ static bool Next_Match(struct find_t *buf)
 	return false;
 }
 
-unsigned _dos_findfirst(const char *path, unsigned, struct find_t *buf)
+unsigned _dos_findfirst(const char *dos_path, unsigned, struct find_t *buf)
 {
+	char pbuf[512];
+	const char *path = Posix_Path(dos_path, pbuf, sizeof(pbuf));
 	FindState *state = (FindState *)calloc(1, sizeof(FindState));
 	const char *slash = strrchr(path, '/');
 	const char *bslash = strrchr(path, '\\');
@@ -182,8 +206,10 @@ unsigned _dos_getdiskfree(unsigned, struct diskfree_t *df)
 void _dos_getdrive(unsigned *drive) { *drive = 3; }	/* C: */
 void _dos_setdrive(unsigned, unsigned *total) { if (total) *total = 26; }
 
-unsigned _dos_getfileattr(const char *path, unsigned *attr)
+unsigned _dos_getfileattr(const char *dos_path, unsigned *attr)
 {
+	char pbuf[512];
+	const char *path = Posix_Path(dos_path, pbuf, sizeof(pbuf));
 	struct stat st;
 	if (stat(path, &st) != 0) return 2;
 	*attr = S_ISDIR(st.st_mode) ? _A_SUBDIR : _A_NORMAL;

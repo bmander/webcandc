@@ -20,6 +20,9 @@ from buildflags import CXXFLAGS, sources  # noqa: E402
 CONFIGS = {
     "debug": {"cflags": ["-O1", "-g"], "ldflags": ["-O1", "-g", "-sASSERTIONS=1"]},
     "release": {"cflags": ["-O2"], "ldflags": ["-O2"]},
+    # Node test harness: no SDL window; frames dumped to $WEBCANDC_FRAMES.
+    "headless": {"cflags": ["-O1", "-g", "-DWEBCANDC_HEADLESS"],
+                 "ldflags": ["-O1", "-g", "-sASSERTIONS=1", "-sENVIRONMENT=node"]},
 }
 
 LDFLAGS = [
@@ -75,6 +78,9 @@ def stage_data(stage):
     if not pkg.exists():
         print("warning: data/pkg missing; the game will find no data files")
         return
+    ini = ROOT / "web" / "CONQUER.INI"	# stands in for the one SETUP.EXE wrote
+    if ini.exists():
+        shutil.copy2(ini, stage / "CONQUER.INI")
     for f in pkg.iterdir():
         if f.is_file():
             dst = stage / f.name.upper()
@@ -85,10 +91,11 @@ def stage_data(stage):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--release", action="store_true")
+    ap.add_argument("--headless", action="store_true", help="node test harness build")
     ap.add_argument("--undefined", action="store_true", help="report undefined symbols")
     ap.add_argument("-j", type=int, default=os.cpu_count())
     a = ap.parse_args()
-    config = "release" if a.release else "debug"
+    config = "release" if a.release else ("headless" if a.headless else "debug")
     cfg = CONFIGS[config]
     out = ROOT / "build" / config
     objdir = out / "obj"
@@ -111,10 +118,14 @@ def main():
     stage_data(stage)
     web = out / "web"
     web.mkdir(parents=True, exist_ok=True)
-    link = ["em++", *[str(j[1]) for j in jobs], *cfg["ldflags"], *LDFLAGS,
+    ldflags = [f for f in LDFLAGS if not (config == "headless" and f.startswith("-sENVIRONMENT"))]
+    link = ["em++", *[str(j[1]) for j in jobs], *cfg["ldflags"], *ldflags,
             "--preload-file", f"{stage}@/data",
-            "--shell-file", str(ROOT / "web" / "shell.html"),
-            "-o", str(web / "index.html")]
+            "--js-library", str(ROOT / "src" / "platform" / "library_webcandc.js")]
+    if config == "headless":
+        link += ["-o", str(web / "index.js")]
+    else:
+        link += ["--shell-file", str(ROOT / "web" / "shell.html"), "-o", str(web / "index.html")]
     if a.undefined:
         link.insert(1, "-Wl,--warn-unresolved-symbols")
         link.append("-sERROR_ON_UNDEFINED_SYMBOLS=0")
@@ -131,7 +142,7 @@ def main():
     else:
         if p.stderr.strip():
             sys.stderr.write(p.stderr)
-        print(f"[build] ok -> {web / 'index.html'}")
+        print(f"[build] ok -> {web}")
 
 
 if __name__ == "__main__":
