@@ -159,4 +159,3 @@ update: .SYMBOLIC
 	@copy vqaplay.h ..\include\vqa32 >NUL
 	@copy vqafile.h ..\include\vqa32 >NUL
 
-

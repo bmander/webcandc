@@ -43,7 +43,7 @@
 
 #ifdef WWLIB32_H
 #else
-#include <sys\timeb.h>
+#include <sys/timeb.h>
 #endif
 
 /*

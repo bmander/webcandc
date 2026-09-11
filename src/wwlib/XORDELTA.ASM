@@ -665,4 +665,3 @@ Copy_Delta_Buffer	ENDP
 ;}
 ;
 
-

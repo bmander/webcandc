@@ -1329,4 +1329,3 @@ long VQA_TimerMethod(void)
 #pragma pack(1);
 #endif
 
-

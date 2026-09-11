@@ -170,4 +170,3 @@ update: .SYMBOLIC
 	@copy *.h $(PRJ)\INCLUDE\VQM32 >NUL
 	@copy *.i $(PRJ)\INCLUDE\VQM32 >NUL
 
-

@@ -2415,4 +2415,3 @@ static void Mask_Pointers(VQAData *vqabuf)
 }
 #endif
 
-
